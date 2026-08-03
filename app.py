@@ -1,3 +1,4 @@
+import time
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -9,49 +10,54 @@ st.title("🚀 Sell Put 智能量化扫盘面板")
 # 侧边栏控件设置
 st.sidebar.header("⚙️ 筛选风控设置")
 min_price = st.sidebar.number_input("最低股价 ($)", value=5.0, step=1.0)
-max_price = st.sidebar.number_input("最高股价 ($)", value=15.0, step=1.0)
-max_budget = st.sidebar.number_input("总预算上限 ($)", value=1500, step=100)
-min_volume = st.sidebar.number_input("最低成交量", value=10, step=5)
-min_open_interest = st.sidebar.number_input("最低持仓量", value=50, step=10)
+max_price = st.sidebar.number_input(
+    "最高股价 ($)", value=50.0, step=5.0
+)  # 默认调大到 50，避免股票池过窄
+max_budget = st.sidebar.number_input("总预算上限 ($)", value=5000, step=500)
+min_volume = st.sidebar.number_input("最低成交量", value=5, step=1)
+min_open_interest = st.sidebar.number_input("最低持仓量", value=20, step=5)
 
 btn_scan = st.sidebar.button("🚀 启动量化风控扫盘", type="primary")
 
-# 预设基础热门股票池
+# 扩充高流动性美股标的池（涵盖 $5 ~ $100 的热门美股）
 target_pool = [
+    "PLTR",
+    "HOOD",
     "SOFI",
     "F",
     "NIO",
     "RIVN",
-    "HOOD",
-    "PLTR",
-    "AMC",
-    "AAL",
-    "MARA",
-    "LCID",
     "INTC",
     "BAC",
+    "AAL",
+    "MARA",
+    "AMC",
+    "LCID",
     "CCL",
     "PFE",
-    "CLOV",
     "GRAB",
-    "AUPH",
-    "KGC",
     "VALE",
-    "RIG",
-    "BMY",
     "SNAP",
     "DKNG",
     "WFC",
     "PBR",
+    "COIN",
+    "PYPL",
+    "BABA",
+    "PDD",
+    "JD",
 ]
 
 
 def scan_options():
-    st.info("🤖 正在为您全网扫描活跃标的期权链...")
+    st.info("🤖 正在为您全网扫描活跃标的期权链，请稍候...")
+    progress_bar = st.progress(0)
     final_symbols = []
 
-    # 股价区间过滤
-    for sym in target_pool:
+    # 1. 股价区间过滤
+    total_stocks = len(target_pool)
+    for idx, sym in enumerate(target_pool):
+        progress_bar.progress((idx + 1) / total_stocks)
         try:
             t = yf.Ticker(sym)
             hist = t.history(period="1d")
@@ -59,17 +65,24 @@ def scan_options():
                 p = hist["Close"].iloc[-1]
                 if min_price <= p <= max_price:
                     final_symbols.append((sym, p))
-        except:
+        except Exception:
             continue
+
+    progress_bar.empty()
 
     if not final_symbols:
         st.warning(
-            "未找到符合股价区间的股票，请调宽【最低/最高股价】区间。"
+            "⚠️ 未找到在当前 [最低/最高股价] 区间内的股票，请调宽侧边栏的股价范围（如设为 $5 ~ $100）。"
         )
         return
 
+    st.write(
+        f"✅ 已锁定 {len(final_symbols)} 只符合股价条件的活跃标的，正在计算期权风险回报率..."
+    )
+
     all_opportunities = []
 
+    # 2. 期权链深度分析
     for symbol, current_price in final_symbols:
         try:
             ticker = yf.Ticker(symbol)
@@ -77,6 +90,7 @@ def scan_options():
             if not expirations:
                 continue
 
+            # 扫描前 3 个到期日
             for expiry in expirations[:3]:
                 opt_chain = ticker.option_chain(expiry)
                 puts = opt_chain.puts.copy()
@@ -87,10 +101,14 @@ def scan_options():
                 today = pd.Timestamp.now().normalize()
                 dte = max((expiry_date - today).days, 1)
 
+                # 虚值 OTM 过滤
                 otm_puts = puts[puts["strike"] < current_price].copy()
+
+                # 保证金限制
                 otm_puts["预估保证金"] = otm_puts["strike"] * 100
                 otm_puts = otm_puts[otm_puts["预估保证金"] <= max_budget]
 
+                # 基础活跃度过滤
                 otm_puts["volume"] = otm_puts["volume"].fillna(0)
                 otm_puts["openInterest"] = otm_puts["openInterest"].fillna(0)
                 otm_puts = otm_puts[
@@ -101,14 +119,16 @@ def scan_options():
                 if otm_puts.empty:
                     continue
 
+                # 买卖价差比风控 (价差占比 <= 35%)
                 otm_puts["bid_ask_spread"] = otm_puts["ask"] - otm_puts["bid"]
                 otm_puts["spread_ratio"] = np.where(
                     otm_puts["ask"] > 0,
                     otm_puts["bid_ask_spread"] / otm_puts["ask"],
                     1.0,
                 )
-                otm_puts = otm_puts[otm_puts["spread_ratio"] <= 0.30]
+                otm_puts = otm_puts[otm_puts["spread_ratio"] <= 0.35]
 
+                # Mid 价格估算
                 otm_puts["权利金(Mid)"] = (
                     otm_puts["bid"] + otm_puts["ask"]
                 ) / 2
@@ -131,6 +151,7 @@ def scan_options():
                     * 100
                 )
 
+                # 行权概率 (Delta)
                 if (
                     "delta" in otm_puts.columns
                     and not otm_puts["delta"].isna().all()
@@ -141,9 +162,10 @@ def scan_options():
                         1.0, 50.0 - otm_puts["安全边际(%)"] * 2.2
                     )
 
+                # 风控门槛：行权概率 <= 35%，安全边际 >= 2%
                 otm_puts = otm_puts[
-                    (otm_puts["行权概率(%)"] <= 30.0)
-                    & (otm_puts["安全边际(%)"] >= 3.0)
+                    (otm_puts["行权概率(%)"] <= 35.0)
+                    & (otm_puts["安全边际(%)"] >= 2.0)
                 ]
 
                 if otm_puts.empty:
@@ -156,11 +178,13 @@ def scan_options():
                 )
                 all_opportunities.append(otm_puts)
 
-        except:
+        except Exception:
             continue
 
     if not all_opportunities:
-        st.error("未筛选到同时满足风控条件与资金上限的期权，请微调条件。")
+        st.error(
+            "😭 在当前风控与预算条件下未扫出期权，建议适当提高【最高股价】或【总预算上限】。"
+        )
         return
 
     result_df = pd.concat(all_opportunities, ignore_index=True)
@@ -189,7 +213,7 @@ def scan_options():
         }
     )
 
-    st.success("✅ 扫盘完成！为您呈现综合性价比最高的 Top 15 方案：")
+    st.success("🎯 扫盘完成！为您呈现综合性价比最高的 Top 15 稳健方案：")
     st.dataframe(display_df, use_container_width=True)
 
 
