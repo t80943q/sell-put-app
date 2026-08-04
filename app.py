@@ -242,9 +242,26 @@ def run_scan():
             st.session_state["scan_results"] = res
 
 
+# ------------------ 运行与渲染逻辑 ------------------
 if btn_scan:
-    run_scan()
+    with st.spinner("🤖 正在为您安全扫盘（已启用防频控缓存，请稍候约 10 秒）..."):
+        res = fetch_all_data(
+            min_price, max_price, max_budget, min_volume, min_open_interest
+        )
+        if res is None or res.empty:
+            st.session_state["scan_error"] = True
+            st.session_state["scan_results"] = None
+        else:
+            st.session_state["scan_error"] = False
+            st.session_state["scan_results"] = res
 
+# 如果扫描失败且没有历史结果，才显示提示
+if st.session_state.get("scan_error", False) and (
+    "scan_results" not in st.session_state or st.session_state["scan_results"] is None
+):
+    st.warning("😭 暂时未扫出期权数据，请尝试调整侧边栏参数后重试。")
+
+# 只要有数据，就渲染 2.0 图表、3.0 计算器和数据表
 if (
     "scan_results" in st.session_state
     and st.session_state["scan_results"] is not None
@@ -278,9 +295,7 @@ if (
     # 2. 组合现金流计算器
     st.markdown("---")
     st.subheader("💰 拟合组合现金流计算器")
-    st.caption(
-        "在下方多选您看中的标的，系统将自动汇总您的资金占用与即时现金收入："
-    )
+    st.caption("在下方多选您看中的标的，系统将自动汇总您的资金占用与即时现金收入：")
 
     options_map = {}
     options_list = []
@@ -289,9 +304,7 @@ if (
         options_list.append(label)
         options_map[label] = row
 
-    selected_opts = st.multiselect(
-        "选择准备同时操作的 Sell Put 组合：", options_list
-    )
+    selected_opts = st.multiselect("选择准备同时操作的 Sell Put 组合：", options_list)
 
     if selected_opts:
         total_margin = 0
@@ -302,9 +315,7 @@ if (
             matched = options_map[label]
             total_margin += matched["预估保证金"]
             total_cash += matched["权利金(Mid)"] * 100
-            selected_codes.append(
-                f"{matched['股票代码']} (${matched['strike']})"
-            )
+            selected_codes.append(f"{matched['股票代码']} (${matched['strike']})")
 
         c1, c2, c3 = st.columns(3)
         c1.metric("🔒 选中组合需要资金 (总保证金)", f"${total_margin:,.0f}")
@@ -336,9 +347,7 @@ if (
             "价差比": result_df["spread_ratio"].map("{:.1%}".format),
             "需保证金": result_df["预估保证金"].map("${:,.0f}".format),
             "安全边际": result_df["安全边际(%)"].map("{:.2f}%".format),
-            "年化收益率": result_df["年化收益率(%)"].map(
-                "{:.2f}%".format
-            ),
+            "年化收益率": result_df["年化收益率(%)"].map("{:.2f}%".format),
             "行权概率": result_df["行权概率(%)"].map("{:.2f}%".format),
             "成交量": result_df["volume"].astype(int),
             "持仓量": result_df["openInterest"].astype(int),
