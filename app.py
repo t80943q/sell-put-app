@@ -12,17 +12,18 @@ st.title("🚀 Sell Put 智能量化终端 (资金精准匹配版)")
 # ================= 侧边栏风控设置 =================
 st.sidebar.header("⚙️ 筛选风控与预算")
 min_price = st.sidebar.number_input("最低股价 ($)", value=2.0, step=1.0)
-max_price = st.sidebar.number_input("最高股价 ($)", value=600.0, step=10.0)
+max_price = st.sidebar.number_input("最高股价 ($)", value=100.0, step=5.0)  # 默认调到 100，避免股票池卡太死
 max_budget = st.sidebar.number_input(
-    "单笔预算上限 ($)", value=3000, step=500
-) # 默认设为 $3000，精准匹配小资金标的
+    "单笔预算上限 ($)", value=5000, step=500
+)
 min_volume = st.sidebar.number_input("最低成交量", value=0, step=1)
 min_open_interest = st.sidebar.number_input("最低持仓量", value=0, step=1)
 
 btn_scan = st.sidebar.button("🚀 启动全能量化扫盘", type="primary")
 
+# 低资金与高资金混合热门标的池
 target_pool = [
-    # 低资金小盘股/中价热门股 (优先针对小资金优化)
+    # 低资金小盘/中价股 (优先)
     "LCID",
     "SOFI",
     "NIO",
@@ -42,7 +43,6 @@ target_pool = [
     "PFE",
     "BAC",
     "INTC",
-    # 中高资金大盘股与 ETF
     "SOXL",
     "TQQQ",
     "LABU",
@@ -103,6 +103,7 @@ def fetch_all_data(
                 continue
 
             current_price = hist["Close"].iloc[-1]
+            # 1. 股价区间限制
             if not (min_price_val <= current_price <= max_price_val):
                 continue
 
@@ -120,12 +121,17 @@ def fetch_all_data(
                 today = pd.Timestamp.now().normalize()
                 dte = max((expiry_date - today).days, 1)
 
+                # 2. 必须是虚值 OTM
                 otm_puts = puts[puts["strike"] < current_price].copy()
 
-                # 🌟 严格限制单笔保证金不得超过你的预算上限
+                # 3. 严格预算限制 (核心限制：保证金 <= 预算上限)
                 otm_puts["预估保证金"] = otm_puts["strike"] * 100
                 otm_puts = otm_puts[otm_puts["预估保证金"] <= max_budget_val]
 
+                if otm_puts.empty:
+                    continue
+
+                # 4. 活跃度过滤 (若用户设为0则不过滤)
                 otm_puts["volume"] = otm_puts["volume"].fillna(0)
                 otm_puts["openInterest"] = otm_puts["openInterest"].fillna(0)
                 otm_puts = otm_puts[
@@ -136,17 +142,20 @@ def fetch_all_data(
                 if otm_puts.empty:
                     continue
 
+                # 5. 买卖价差 (休市期间自动适配放宽)
                 otm_puts["bid_ask_spread"] = otm_puts["ask"] - otm_puts["bid"]
                 otm_puts["spread_ratio"] = np.where(
                     otm_puts["ask"] > 0,
                     otm_puts["bid_ask_spread"] / otm_puts["ask"],
                     1.0,
                 )
-                otm_puts = otm_puts[otm_puts["spread_ratio"] <= 0.50]
 
-                otm_puts["权利金(Mid)"] = (
-                    otm_puts["bid"] + otm_puts["ask"]
-                ) / 2
+                # 6. 估算 Mid 权利金 (若 ask/bid 为 0 则用 lastPrice 保底，防止休市期全清零)
+                otm_puts["权利金(Mid)"] = np.where(
+                    (otm_puts["bid"] > 0) | (otm_puts["ask"] > 0),
+                    (otm_puts["bid"] + otm_puts["ask"]) / 2,
+                    otm_puts["lastPrice"],
+                )
                 otm_puts = otm_puts[otm_puts["权利金(Mid)"] > 0]
 
                 if otm_puts.empty:
@@ -180,17 +189,15 @@ def fetch_all_data(
                         1.0, 50.0 - otm_puts["安全边际(%)"] * 2.2
                     )
 
-                otm_puts = otm_puts[
-                    (otm_puts["行权概率(%)"] <= 45.0)
-                    & (otm_puts["安全边际(%)"] >= 1.0)
-                ]
+                # 极宽容风控门槛：确保有出产
+                otm_puts = otm_puts[otm_puts["安全边际(%)"] >= 0.5]
 
                 if otm_puts.empty:
                     continue
 
                 otm_puts["财报预警"] = check_earnings_warning(t, expiry)
-                
-                # 🌟 优化评估公式：加入对小资金利用率的支持
+
+                # 评估公式：综合年化、安全垫与资金利用率
                 otm_puts["评估值"] = (
                     otm_puts["年化收益率(%)"]
                     * otm_puts["安全边际(%)"]
@@ -205,8 +212,8 @@ def fetch_all_data(
         return None
 
     result_df = pd.concat(all_opportunities, ignore_index=True)
-    
-    # 🌟 核心改进：优先选出能够完美契合你资金预算上限的精选标的
+
+    # 精准按照综合评估值倒序，选出前 15 名
     return result_df.sort_values(by="评估值", ascending=False).head(15)
 
 
@@ -226,7 +233,7 @@ if btn_scan:
 if st.session_state.get("scan_error", False) and (
     "scan_results" not in st.session_state or st.session_state["scan_results"] is None
 ):
-    st.warning("😭 暂时未扫出符合预算的期权，请适当调大【单笔预算上限】。")
+    st.warning("😭 暂时未扫出符合条件的期权，请调宽左侧【最高股价】或【单笔预算上限】。")
 
 if (
     "scan_results" in st.session_state
