@@ -14,8 +14,8 @@ max_price = st.sidebar.number_input("最高股价 ($)", value=250.0, step=10.0)
 max_budget = st.sidebar.number_input("单笔预算上限 ($)", value=3000, step=500)
 min_volume = st.sidebar.number_input("最低成交量", value=0, step=1)
 min_open_interest = st.sidebar.number_input(
-    "最低持仓量(张)", value=20, step=5
-)  # 默认设为20张，斩断1张僵尸单
+    "最低持仓量(张)", value=0, step=1
+)  # 默认设为0，确保休市时也能正常出数据；想防死单调大即可
 
 btn_scan = st.sidebar.button("🚀 启动全能量化扫盘", type="primary")
 
@@ -121,12 +121,15 @@ def fetch_all_data_fast(
         if otm_puts.empty:
           continue
 
-        # 🌟【死单抹杀规则 1】：必须有真实未平仓持仓量，过滤未平仓数仅个位数的无人问津死单
         otm_puts["openInterest"] = otm_puts["openInterest"].fillna(0)
         otm_puts["volume"] = otm_puts["volume"].fillna(0)
 
-        # 只要未平仓小于设定门槛（默认20张），直接抹杀
-        otm_puts = otm_puts[otm_puts["openInterest"] >= max(min_oi_val, 15)]
+        # 🌟 动态匹配：严格遵照侧边栏的用户设置，设为0就不强制切断
+        if min_oi_val > 0:
+          otm_puts = otm_puts[otm_puts["openInterest"] >= min_oi_val]
+
+        if min_vol_val > 0:
+          otm_puts = otm_puts[otm_puts["volume"] >= min_vol_val]
 
         if otm_puts.empty:
           continue
@@ -135,7 +138,7 @@ def fetch_all_data_fast(
         otm_puts["ask"] = otm_puts["ask"].fillna(0.0)
         otm_puts["lastPrice"] = otm_puts["lastPrice"].fillna(0.0)
 
-        # 挂单参考价
+        # 挂单参考价算法
         otm_puts["Mid"] = (otm_puts["bid"] + otm_puts["ask"]) / 2
         otm_puts["推荐挂单价"] = np.where(
             otm_puts["bid"] > 0,
@@ -143,8 +146,8 @@ def fetch_all_data_fast(
             otm_puts["lastPrice"],
         )
 
-        # 🌟【死单抹杀规则 2】：极度深虚值（权利金单手低于 $2 美元/0.02）坚决剔除
-        otm_puts = otm_puts[otm_puts["推荐挂单价"] >= 0.02]
+        # 过滤掉挂单价未达 $0.01 的死单
+        otm_puts = otm_puts[otm_puts["推荐挂单价"] >= 0.01]
 
         if otm_puts.empty:
           continue
@@ -158,8 +161,8 @@ def fetch_all_data_fast(
             (current_price - otm_puts["strike"]) / current_price
         ) * 100
 
-        # 🌟【死单抹杀规则 3】：安全边际超过 38% 的过远虚值单（如 SNAP $2.5P）无真实买家，剔除
-        otm_puts = otm_puts[otm_puts["安全边际(%)"] <= 38.0]
+        # 安全边际限制（过远虚值单丢弃）
+        otm_puts = otm_puts[otm_puts["安全边际(%)"] <= 40.0]
 
         if otm_puts.empty:
           continue
@@ -175,18 +178,18 @@ def fetch_all_data_fast(
           otm_puts["行权概率(%)"] = otm_puts["delta"].abs() * 100
         else:
           otm_puts["行权概率(%)"] = np.maximum(
-              1.0, 50.0 - otm_puts["安全边际(%)"] * 2.2
+              0.5, 50.0 - otm_puts["安全边际(%)"] * 2.2
           )
 
-        # 🌟【死单抹杀规则 4】：行权概率（Delta）过小（< 2.0%）说明做市商已放弃报价，剔除
-        otm_puts = otm_puts[otm_puts["行权概率(%)"] >= 2.0]
+        # 过滤 Delta < 1.0% 的极度僵尸单
+        otm_puts = otm_puts[otm_puts["行权概率(%)"] >= 1.0]
 
         if otm_puts.empty:
           continue
 
         otm_puts["财报预警"] = check_earnings_warning(t, expiry)
 
-        # 真实合理评分公式
+        # 评估公式
         otm_puts["评估值"] = (
             otm_puts["年化收益率(%)"]
             * otm_puts["安全边际(%)"]
@@ -224,7 +227,7 @@ if st.session_state.get("scan_error", False) and (
     "scan_results" not in st.session_state or st.session_state["scan_results"] is None
 ):
   st.warning(
-      "😭 未扫出兼具真实流动性与高性价比的期权，建议适当微调侧边栏预算。"
+      "😭 未扫出符合条件的期权，建议调大【单笔预算上限】或把【最低持仓量】设为0重试。"
   )
 
 if (
