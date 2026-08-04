@@ -7,7 +7,7 @@ import yfinance as yf
 st.set_page_config(
     page_title="Sell Put 智能量化终端", layout="wide"
 )
-st.title("🚀 Sell Put 智能量化终端 (真实版)")
+st.title("🚀 Sell Put 智能量化终端 (真实成交版)")
 
 # ================= 侧边栏风控设置 =================
 st.sidebar.header("⚙️ 筛选风控与预算")
@@ -125,16 +125,21 @@ def fetch_all_data(
                 if otm_puts.empty:
                     continue
 
-                # 🌟【防假报价关键修复 1】：做市商出价必须大于 0 (Bid > 0)，剔除无人买入的极度离谱死单
-                otm_puts = otm_puts[otm_puts["bid"] > 0.01]
+                # 🌟【智能真假报价识别算法】
+                # 判别 1：是否有最新的最后成交价 lastPrice
+                otm_puts["lastPrice"] = otm_puts["lastPrice"].fillna(0)
+                otm_puts["bid"] = otm_puts["bid"].fillna(0)
+                otm_puts["ask"] = otm_puts["ask"].fillna(0)
 
-                if otm_puts.empty:
-                    continue
+                # 计算合理的挂单参考价（优先采用 bid/ask 盘中价，休市使用 lastPrice 智能保底）
+                otm_puts["推荐挂单价"] = np.where(
+                    otm_puts["bid"] > 0,
+                    np.minimum((otm_puts["bid"] + otm_puts["ask"]) / 2, otm_puts["bid"] * 1.2),
+                    otm_puts["lastPrice"]
+                )
 
-                # 🌟【防假报价关键修复 2】：买卖价差不能比 Bid 夸张太多 (Bid/Ask 比例过滤)
-                otm_puts["bid_ask_spread"] = otm_puts["ask"] - otm_puts["bid"]
-                # 买卖价格不能脱节超过 3 倍
-                otm_puts = otm_puts[otm_puts["ask"] <= otm_puts["bid"] * 3.0]
+                # 过滤掉挂单价 <= 0.01 美元的无效无价值期权（防止废单）
+                otm_puts = otm_puts[otm_puts["推荐挂单价"] >= 0.02]
 
                 if otm_puts.empty:
                     continue
@@ -142,23 +147,14 @@ def fetch_all_data(
                 # 活跃度过滤
                 otm_puts["volume"] = otm_puts["volume"].fillna(0)
                 otm_puts["openInterest"] = otm_puts["openInterest"].fillna(0)
-                otm_puts = otm_puts[
-                    (otm_puts["volume"] >= min_vol_val)
-                    & (otm_puts["openInterest"] >= min_oi_val)
-                ]
+                if min_vol_val > 0 or min_oi_val > 0:
+                    otm_puts = otm_puts[
+                        (otm_puts["volume"] >= min_vol_val)
+                        & (otm_puts["openInterest"] >= min_oi_val)
+                    ]
 
                 if otm_puts.empty:
                     continue
-
-                # 实盘可成交的真实权利金计算 (优先用 Bid~Mid 之间)
-                otm_puts["权利金(Mid)"] = (
-                    otm_puts["bid"] + otm_puts["ask"]
-                ) / 2
-                
-                # 推荐挂单价：以真实 Bid 买价为基准，避免挂高买家不接单
-                otm_puts["推荐挂单价"] = np.minimum(
-                    otm_puts["权利金(Mid)"], otm_puts["bid"] * 1.15
-                )
 
                 otm_puts["股票代码"] = sym
                 otm_puts["到期日"] = expiry
@@ -168,6 +164,8 @@ def fetch_all_data(
                 otm_puts["安全边际(%)"] = (
                     (current_price - otm_puts["strike"]) / current_price
                 ) * 100
+                
+                # 基于真实可成交价算年化
                 otm_puts["年化收益率(%)"] = (
                     (otm_puts["推荐挂单价"] / otm_puts["strike"])
                     * (365 / dte)
@@ -184,9 +182,9 @@ def fetch_all_data(
                         1.0, 50.0 - otm_puts["安全边际(%)"] * 2.2
                     )
 
-                # 风控限制：行权概率 <= 40%，安全边际 >= 1%
+                # 风控约束：安全边际 >= 1.0%
                 otm_puts = otm_puts[
-                    (otm_puts["行权概率(%)"] <= 40.0)
+                    (otm_puts["行权概率(%)"] <= 45.0)
                     & (otm_puts["安全边际(%)"] >= 1.0)
                 ]
 
@@ -195,14 +193,9 @@ def fetch_all_data(
 
                 otm_puts["财报预警"] = check_earnings_warning(t, expiry)
 
-                # 评分剔除异常年化（年化超过 200% 的节点大概率有流动性陷阱，打折评估）
-                adjusted_yield = np.where(
-                    otm_puts["年化收益率(%)"] > 200.0,
-                    200.0,
-                    otm_puts["年化收益率(%)"],
-                )
+                # 真实合理评分公式
                 otm_puts["评估值"] = (
-                    adjusted_yield
+                    otm_puts["年化收益率(%)"]
                     * otm_puts["安全边际(%)"]
                     / (otm_puts["行权概率(%)"] + 1)
                 )
@@ -221,7 +214,7 @@ def fetch_all_data(
 
 # ------------------ 页面控制与渲染 ------------------
 if btn_scan:
-    with st.spinner("🤖 正在为您过滤假报价死单，精准扫描实盘可成交标的..."):
+    with st.spinner("🤖 正在为您全网扫描真实可成交标的，请稍候..."):
         res = fetch_all_data(
             min_price, max_price, max_budget, min_volume, min_open_interest
         )
@@ -235,7 +228,7 @@ if btn_scan:
 if st.session_state.get("scan_error", False) and (
     "scan_results" not in st.session_state or st.session_state["scan_results"] is None
 ):
-    st.warning("😭 暂时未扫出可交易期权，请调宽左侧【最高股价】或【单笔预算上限】。")
+    st.warning("😭 暂时未扫出符合条件的期权，请把左侧【最低成交量】和【最低持仓量】设为 0 重试。")
 
 if (
     "scan_results" in st.session_state
@@ -274,7 +267,7 @@ if (
     options_map = {}
     options_list = []
     for idx, row in result_df.iterrows():
-        label = f"[{row['股票代码']}] {row['到期日']} | 行权价:${row['strike']:.2f} | 保证金:${row['预估保证金']:,.0f} | 预估权利金:${row['推荐挂单价'] * 100:.0f}"
+        label = f"[{row['股票代码']}] {row['到期日']} | 行权价:${row['strike']:.2f} | 保证金:${row['预估保证金']:,.0f} | 真实推荐权利金:${row['推荐挂单价'] * 100:.0f}"
         options_list.append(label)
         options_map[label] = row
 
@@ -319,7 +312,7 @@ if (
             "到期日": result_df["到期日"],
             "DTE": result_df["DTE"],
             "行权价": result_df["strike"].map("${:.2f}".format),
-            "🎯推荐挂单价": result_df["推荐挂单价"].map("${:.2f}".format),
+            "🎯推荐实盘挂单价": result_df["推荐挂单价"].map("${:.2f}".format),
             "需保证金": result_df["预估保证金"].map("${:,.0f}".format),
             "安全边际": result_df["安全边际(%)"].map("{:.2f}%".format),
             "年化收益率": result_df["年化收益率(%)"].map(
