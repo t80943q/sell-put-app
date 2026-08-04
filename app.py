@@ -15,7 +15,7 @@ max_budget = st.sidebar.number_input("单笔预算上限 ($)", value=3000, step=
 min_volume = st.sidebar.number_input("最低成交量", value=0, step=1)
 min_open_interest = st.sidebar.number_input(
     "最低持仓量(张)", value=20, step=5
-)  # 默认设为20张，配合平滑算法盘后也不会误杀
+)
 
 btn_scan = st.sidebar.button("🚀 启动全能量化扫盘", type="primary")
 
@@ -127,9 +127,6 @@ def fetch_all_data_fast(
         otm_puts["bid"] = otm_puts["bid"].fillna(0.0)
         otm_puts["ask"] = otm_puts["ask"].fillna(0.0)
 
-        # 🌟【智能持仓量平滑降级逻辑】：
-        # 盘中：严格按 openInterest 筛选；
-        # 盘后/休市数据空缺时：若 (持仓>=设定期限) 或 (成交量>0) 或 (有有效历史成交价/买单)，均视为真流动性放行！
         if min_oi_val > 0:
           otm_puts = otm_puts[
               (otm_puts["openInterest"] >= min_oi_val)
@@ -146,7 +143,6 @@ def fetch_all_data_fast(
         if otm_puts.empty:
           continue
 
-        # 挂单参考价算法
         otm_puts["Mid"] = (otm_puts["bid"] + otm_puts["ask"]) / 2
         otm_puts["推荐挂单价"] = np.where(
             otm_puts["bid"] > 0,
@@ -154,7 +150,6 @@ def fetch_all_data_fast(
             otm_puts["lastPrice"],
         )
 
-        # 过滤掉挂单价未达 $0.01 的废单
         otm_puts = otm_puts[otm_puts["推荐挂单价"] >= 0.01]
 
         if otm_puts.empty:
@@ -169,7 +164,6 @@ def fetch_all_data_fast(
             (current_price - otm_puts["strike"]) / current_price
         ) * 100
 
-        # 安全边际限制（过远虚值单丢弃）
         otm_puts = otm_puts[otm_puts["安全边际(%)"] <= 40.0]
 
         if otm_puts.empty:
@@ -181,7 +175,6 @@ def fetch_all_data_fast(
             * 100
         )
 
-        # Delta/行权概率校验
         if "delta" in otm_puts.columns and not otm_puts["delta"].isna().all():
           otm_puts["行权概率(%)"] = otm_puts["delta"].abs() * 100
         else:
@@ -189,7 +182,6 @@ def fetch_all_data_fast(
               0.5, 50.0 - otm_puts["安全边际(%)"] * 2.2
           )
 
-        # 过滤 Delta < 1.0% 的极度僵尸单
         otm_puts = otm_puts[otm_puts["行权概率(%)"] >= 1.0]
 
         if otm_puts.empty:
@@ -197,7 +189,6 @@ def fetch_all_data_fast(
 
         otm_puts["财报预警"] = check_earnings_warning(t, expiry)
 
-        # 评估公式
         otm_puts["评估值"] = (
             otm_puts["年化收益率(%)"]
             * otm_puts["安全边际(%)"]
@@ -234,7 +225,7 @@ if btn_scan:
 if st.session_state.get("scan_error", False) and (
     "scan_results" not in st.session_state or st.session_state["scan_results"] is None
 ):
-  st.warning("😭 未扫出符合条件的期权，请调大【单笔预算上限】重试。")
+  st.warning("😭 未扫出符合条件的期权，建议调大【单笔预算上限】重试。")
 
 if (
     "scan_results" in st.session_state
@@ -273,7 +264,7 @@ if (
   options_map = {}
   options_list = []
   for idx, row in result_df.iterrows():
-    label = f"[{row['股票代码']}] {row['到期日']} | 行权价:${row['strike']:.2f} | 保证金:${row['预估保证金']:,.0f} | 真实推荐权利金:${row['推荐挂单价'] * 100:.0f}"
+    label = f"[{row['股票代码']}] 到期日:{row['到期日']}(还剩{row['DTE']}天) | 行权价:${row['strike']:.2f} | 保证金:${row['预估保证金']:,.0f} | 真实推荐权利金:${row['推荐挂单价'] * 100:.0f}"
     options_list.append(label)
     options_map[label] = row
 
@@ -307,19 +298,20 @@ if (
 
   st.markdown("---")
 
+  # 🌟 优化表格列名与展示，增加 DTE(到期天数) 明确注释
   st.subheader("📋 详细数据与实盘挂单指南")
   display_df = pd.DataFrame({
       "代码": result_df["股票代码"],
       "现价": result_df["股价"].map("${:.2f}".format),
       "财报预警": result_df["财报预警"],
       "到期日": result_df["到期日"],
-      "DTE": result_df["DTE"],
+      "DTE (到期天数)": result_df["DTE"].map("{} 天".format),  # 增加明确注释与天数单位
       "行权价": result_df["strike"].map("${:.2f}".format),
       "🎯推荐实盘挂单价": result_df["推荐挂单价"].map("${:.2f}".format),
       "需保证金": result_df["预估保证金"].map("${:,.0f}".format),
       "安全边际": result_df["安全边际(%)"].map("{:.2f}%".format),
       "年化收益率": result_df["年化收益率(%)"].map("{:.2f}%".format),
-      "行权概率": result_df["行权概率(%)"].map("{:.2f}%".format),
+      "行权概率(Delta估算)": result_df["行权概率(%)"].map("{:.2f}%".format),
       "成交量": result_df["volume"].astype(int),
       "持仓量": result_df["openInterest"].astype(int),
       "综合评分": result_df["评估值"].map("{:.2f}".format),
