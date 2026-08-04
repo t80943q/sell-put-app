@@ -7,13 +7,13 @@ import yfinance as yf
 st.set_page_config(
     page_title="Sell Put 智能量化终端", layout="wide"
 )
-st.title("🚀 Sell Put 智能量化终端 (真实成交版)")
+st.title("🚀 Sell Put 智能量化终端 (全天候稳定保底版)")
 
 # ================= 侧边栏风控设置 =================
 st.sidebar.header("⚙️ 筛选风控与预算")
 min_price = st.sidebar.number_input("最低股价 ($)", value=2.0, step=1.0)
 max_price = st.sidebar.number_input("最高股价 ($)", value=100.0, step=5.0)
-max_budget = st.sidebar.number_input("单笔预算上限 ($)", value=5000, step=500)
+max_budget = st.sidebar.number_input("单笔预算上限 ($)", value=10000, step=500)
 min_volume = st.sidebar.number_input("最低成交量", value=0, step=1)
 min_open_interest = st.sidebar.number_input("最低持仓量", value=0, step=1)
 
@@ -81,7 +81,7 @@ def check_earnings_warning(ticker_obj, expiry_str):
     return "✅ 安全(无预警)"
 
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def fetch_all_data(
     min_price_val,
     max_price_val,
@@ -106,7 +106,8 @@ def fetch_all_data(
             if not expirations:
                 continue
 
-            for expiry in expirations[:3]:
+            # 🌟 扩充扫描前 5 个到期日，增加匹配成功率
+            for expiry in expirations[:5]:
                 opt_chain = t.option_chain(expiry)
                 puts = opt_chain.puts.copy()
                 if puts.empty:
@@ -116,30 +117,32 @@ def fetch_all_data(
                 today = pd.Timestamp.now().normalize()
                 dte = max((expiry_date - today).days, 1)
 
+                # 找虚值 OTM
                 otm_puts = puts[puts["strike"] < current_price].copy()
+                if otm_puts.empty:
+                    continue
 
-                # 保证金限制
                 otm_puts["预估保证金"] = otm_puts["strike"] * 100
                 otm_puts = otm_puts[otm_puts["预估保证金"] <= max_budget_val]
 
                 if otm_puts.empty:
                     continue
 
-                # 🌟【智能真假报价识别算法】
-                # 判别 1：是否有最新的最后成交价 lastPrice
-                otm_puts["lastPrice"] = otm_puts["lastPrice"].fillna(0)
-                otm_puts["bid"] = otm_puts["bid"].fillna(0)
-                otm_puts["ask"] = otm_puts["ask"].fillna(0)
+                # 🌟 安全数值填充：防范 yfinance 的 NaN 导致整个表被删掉
+                otm_puts["bid"] = otm_puts["bid"].fillna(0.0)
+                otm_puts["ask"] = otm_puts["ask"].fillna(0.0)
+                otm_puts["lastPrice"] = otm_puts["lastPrice"].fillna(0.0)
 
-                # 计算合理的挂单参考价（优先采用 bid/ask 盘中价，休市使用 lastPrice 智能保底）
+                # 推荐实盘挂单价逻辑
+                otm_puts["Mid"] = (otm_puts["bid"] + otm_puts["ask"]) / 2
                 otm_puts["推荐挂单价"] = np.where(
                     otm_puts["bid"] > 0,
-                    np.minimum((otm_puts["bid"] + otm_puts["ask"]) / 2, otm_puts["bid"] * 1.2),
-                    otm_puts["lastPrice"]
+                    np.minimum(otm_puts["Mid"], otm_puts["bid"] * 1.2),
+                    otm_puts["lastPrice"],
                 )
 
-                # 过滤掉挂单价 <= 0.01 美元的无效无价值期权（防止废单）
-                otm_puts = otm_puts[otm_puts["推荐挂单价"] >= 0.02]
+                # 剔除无效单（推荐挂单价必须 >= $0.01）
+                otm_puts = otm_puts[otm_puts["推荐挂单价"] >= 0.01]
 
                 if otm_puts.empty:
                     continue
@@ -165,7 +168,6 @@ def fetch_all_data(
                     (current_price - otm_puts["strike"]) / current_price
                 ) * 100
                 
-                # 基于真实可成交价算年化
                 otm_puts["年化收益率(%)"] = (
                     (otm_puts["推荐挂单价"] / otm_puts["strike"])
                     * (365 / dte)
@@ -179,21 +181,12 @@ def fetch_all_data(
                     otm_puts["行权概率(%)"] = otm_puts["delta"].abs() * 100
                 else:
                     otm_puts["行权概率(%)"] = np.maximum(
-                        1.0, 50.0 - otm_puts["安全边际(%)"] * 2.2
+                        0.5, 50.0 - otm_puts["安全边际(%)"] * 2.2
                     )
-
-                # 风控约束：安全边际 >= 1.0%
-                otm_puts = otm_puts[
-                    (otm_puts["行权概率(%)"] <= 45.0)
-                    & (otm_puts["安全边际(%)"] >= 1.0)
-                ]
-
-                if otm_puts.empty:
-                    continue
 
                 otm_puts["财报预警"] = check_earnings_warning(t, expiry)
 
-                # 真实合理评分公式
+                # 算法评分
                 otm_puts["评估值"] = (
                     otm_puts["年化收益率(%)"]
                     * otm_puts["安全边际(%)"]
@@ -214,7 +207,7 @@ def fetch_all_data(
 
 # ------------------ 页面控制与渲染 ------------------
 if btn_scan:
-    with st.spinner("🤖 正在为您全网扫描真实可成交标的，请稍候..."):
+    with st.spinner("🤖 正在为您全网扫描精选标的，请稍候约 10 秒..."):
         res = fetch_all_data(
             min_price, max_price, max_budget, min_volume, min_open_interest
         )
@@ -228,7 +221,7 @@ if btn_scan:
 if st.session_state.get("scan_error", False) and (
     "scan_results" not in st.session_state or st.session_state["scan_results"] is None
 ):
-    st.warning("😭 暂时未扫出符合条件的期权，请把左侧【最低成交量】和【最低持仓量】设为 0 重试。")
+    st.warning("😭 暂时未扫出符合条件的期权，请调大左侧【单笔预算上限】重试。")
 
 if (
     "scan_results" in st.session_state
