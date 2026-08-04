@@ -7,54 +7,49 @@ import yfinance as yf
 st.set_page_config(
     page_title="Sell Put 智能量化终端", layout="wide"
 )
-st.title("🚀 Sell Put 智能量化终端 (实时纯净版)")
+st.title("🚀 Sell Put 智能量化终端 (25黄金标的平衡版)")
 
 # ================= 侧边栏风控设置 =================
 st.sidebar.header("⚙️ 筛选风控与预算")
 min_price = st.sidebar.number_input("最低股价 ($)", value=2.0, step=1.0)
-max_price = st.sidebar.number_input("最高股价 ($)", value=100.0, step=5.0)
+max_price = st.sidebar.number_input("最高股价 ($)", value=600.0, step=10.0)
 max_budget = st.sidebar.number_input("单笔预算上限 ($)", value=10000, step=500)
 min_volume = st.sidebar.number_input("最低成交量", value=0, step=1)
 min_open_interest = st.sidebar.number_input("最低持仓量", value=0, step=1)
 
 btn_scan = st.sidebar.button("🚀 启动全能量化扫盘", type="primary")
 
+# 🌟 扩充后的 25 个黄金标的池
 target_pool = [
+    # 1. 小资金/高弹性标的
     "LCID",
     "SOFI",
     "NIO",
     "F",
-    "RIVN",
-    "PLTR",
     "HOOD",
+    "PLTR",
     "CLSK",
     "MARA",
-    "RIOT",
-    "GRAB",
-    "AFRM",
-    "SNAP",
-    "DKNG",
-    "AAL",
-    "CCL",
-    "PFE",
-    "BAC",
-    "INTC",
+    # 2. 热门科技大盘/七姐妹
+    "AMD",
+    "TSLA",
+    "NVDA",
+    "AAPL",
+    "AMZN",
+    "GOOGL",
+    "META",
+    "MSFT",
+    # 3. 核心 ETF 专区
     "SOXL",
     "TQQQ",
-    "LABU",
-    "AMD",
-    "NVDA",
-    "TSLA",
-    "AAPL",
-    "MSFT",
-    "GOOGL",
-    "AMZN",
-    "META",
-    "QQQ",
-    "SPY",
     "IWM",
+    "SPY",
+    "QQQ",
     "TLT",
-    "SLV",
+    # 4. 高交易量中价标的
+    "RIVN",
+    "AFRM",
+    "COIN",
 ]
 
 
@@ -81,7 +76,7 @@ def check_earnings_warning(ticker_obj, expiry_str):
     return "✅ 安全(无预警)"
 
 
-def fetch_all_data_realtime(
+def fetch_all_data_fast(
     min_price_val,
     max_price_val,
     max_budget_val,
@@ -90,7 +85,13 @@ def fetch_all_data_realtime(
 ):
     all_opportunities = []
 
-    for sym in target_pool:
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
+    for idx, sym in enumerate(target_pool):
+        progress_bar.progress((idx + 1) / len(target_pool))
+        status_text.text(f"🔍 正在扫盘标的: {sym} ({idx+1}/{len(target_pool)})")
+
         try:
             t = yf.Ticker(sym)
             hist = t.history(period="1d")
@@ -105,7 +106,7 @@ def fetch_all_data_realtime(
             if not expirations:
                 continue
 
-            for expiry in expirations[:5]:
+            for expiry in expirations[:3]:
                 opt_chain = t.option_chain(expiry)
                 puts = opt_chain.puts.copy()
                 if puts.empty:
@@ -129,6 +130,7 @@ def fetch_all_data_realtime(
                 otm_puts["ask"] = otm_puts["ask"].fillna(0.0)
                 otm_puts["lastPrice"] = otm_puts["lastPrice"].fillna(0.0)
 
+                # 挂单参考价
                 otm_puts["Mid"] = (otm_puts["bid"] + otm_puts["ask"]) / 2
                 otm_puts["推荐挂单价"] = np.where(
                     otm_puts["bid"] > 0,
@@ -190,6 +192,9 @@ def fetch_all_data_realtime(
         except Exception:
             continue
 
+    progress_bar.empty()
+    status_text.empty()
+
     if not all_opportunities:
         return None
 
@@ -199,21 +204,22 @@ def fetch_all_data_realtime(
 
 # ------------------ 页面控制与渲染 ------------------
 if btn_scan:
-    with st.spinner("🤖 正在为您全网扫盘，请稍候约 10 秒..."):
-        res = fetch_all_data_realtime(
-            min_price, max_price, max_budget, min_volume, min_open_interest
-        )
-        if res is None or res.empty:
-            st.session_state["scan_error"] = True
-            st.session_state["scan_results"] = None
-        else:
-            st.session_state["scan_error"] = False
-            st.session_state["scan_results"] = res
+    res = fetch_all_data_fast(
+        min_price, max_price, max_budget, min_volume, min_open_interest
+    )
+    if res is None or res.empty:
+        st.session_state["scan_error"] = True
+        st.session_state["scan_results"] = None
+    else:
+        st.session_state["scan_error"] = False
+        st.session_state["scan_results"] = res
 
 if st.session_state.get("scan_error", False) and (
     "scan_results" not in st.session_state or st.session_state["scan_results"] is None
 ):
-    st.warning("😭 暂时未扫出符合条件的期权，请调大左侧【单笔预算上限】重试。")
+    st.warning(
+        "😭 暂时未扫出符合条件的期权，请调大左侧【单笔预算上限】或【最高股价】重试。"
+    )
 
 if (
     "scan_results" in st.session_state
