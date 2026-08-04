@@ -1,3 +1,4 @@
+import time
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -5,42 +6,42 @@ import streamlit as st
 import yfinance as yf
 
 st.set_page_config(
-    page_title="Sell Put 终极量化终端 3.0 (七姐妹+ETF全集)", layout="wide"
+    page_title="Sell Put 终极量化终端 3.0", layout="wide"
 )
-st.title("🚀 Sell Put 智能量化终端 3.0 (科技七姐妹 + 黄金 ETF 旗舰版)")
+st.title("🚀 Sell Put 智能量化终端 3.0 (增强版)")
 
 # ================= 侧边栏风控设置 =================
 st.sidebar.header("⚙️ 筛选风控与预算")
 min_price = st.sidebar.number_input("最低股价 ($)", value=5.0, step=1.0)
-# 调高最高股价和预算上限，以完美容纳科技七姐妹（如 META, MSFT, NVDA 等）
 max_price = st.sidebar.number_input("最高股价 ($)", value=600.0, step=10.0)
 max_budget = st.sidebar.number_input(
-    "单笔预算上限 ($)", value=50000, step=1000
+    "单笔预算上限 ($)", value=80000, step=1000
 )
-min_volume = st.sidebar.number_input("最低成交量", value=10, step=1)
-min_open_interest = st.sidebar.number_input("最低持仓量", value=20, step=5)
+# 适当放宽非交易时间的流动性限制，避免周末扫不出数据
+min_volume = st.sidebar.number_input("最低成交量", value=0, step=1)
+min_open_interest = st.sidebar.number_input("最低持仓量", value=5, step=5)
 
 btn_scan = st.sidebar.button("🚀 启动 3.0 全能量化扫盘", type="primary")
 
-# 🌟 50 个全网最高流动性标的池：科技七姐妹 + 黄金 ETF + 热门高弹性科技股
+# 50 个高流动性热门美股 + 七姐妹 + ETF 标的池
 target_pool = [
-    # 👑 科技七姐妹 (Magnificent 7)
-    "AAPL",  # 苹果
-    "MSFT",  # 微软
-    "NVDA",  # 英伟达
-    "GOOGL",  # 谷歌
-    "AMZN",  # 亚马逊
-    "META",  # Meta
-    "TSLA",  # 特斯拉
+    # 👑 科技七姐妹
+    "AAPL",
+    "MSFT",
+    "NVDA",
+    "GOOGL",
+    "AMZN",
+    "META",
+    "TSLA",
     # 🛡️ 核心 ETF 专区
-    "SOXL",  # 3倍做多半导体
-    "TQQQ",  # 3倍做多纳斯达克100
-    "LABU",  # 3倍做多生物医药
-    "IWM",  # 罗素2000小盘股大盘
-    "QQQ",  # 纳斯达克100大盘
-    "SPY",  # 标普500大盘
-    "TLT",  # 20年期+美国国债
-    "SLV",  # 白银ETF
+    "SOXL",
+    "TQQQ",
+    "LABU",
+    "IWM",
+    "QQQ",
+    "SPY",
+    "TLT",
+    "SLV",
     # 热门成长与高流动性个股
     "PLTR",
     "HOOD",
@@ -101,42 +102,37 @@ def check_earnings_warning(ticker_obj, expiry_str):
     return "✅ 安全(无预警)"
 
 
-def run_scan():
-    st.info("🤖 正在为您全网扫描七姐妹、ETF及热门标的期权链...")
-    progress_bar = st.progress(0)
-    final_symbols = []
+# 🌟 增加 10 分钟数据缓存，避免短时间内频繁请求被 Yahoo 限制 IP
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_all_data(
+    min_price_val,
+    max_price_val,
+    max_budget_val,
+    min_vol_val,
+    min_oi_val,
+):
+    all_opportunities = []
 
-    total_stocks = len(target_pool)
-    for idx, sym in enumerate(target_pool):
-        progress_bar.progress((idx + 1) / total_stocks)
+    for sym in target_pool:
+        # 防限流：每次微小暂停 0.05 秒
+        time.sleep(0.05)
         try:
             t = yf.Ticker(sym)
             hist = t.history(period="1d")
-            if not hist.empty:
-                p = hist["Close"].iloc[-1]
-                if min_price <= p <= max_price:
-                    final_symbols.append((sym, p, t))
-        except Exception:
-            continue
+            if hist.empty:
+                continue
 
-    progress_bar.empty()
+            current_price = hist["Close"].iloc[-1]
+            if not (min_price_val <= current_price <= max_price_val):
+                continue
 
-    if not final_symbols:
-        st.warning(
-            "⚠️ 未找到在当前 [最低/最高股价] 区间内的股票，请调宽侧边栏的股价范围。"
-        )
-        return
-
-    all_opportunities = []
-
-    for symbol, current_price, ticker_obj in final_symbols:
-        try:
-            expirations = ticker_obj.options
+            expirations = t.options
             if not expirations:
                 continue
 
+            # 抓取前 3 个到期日
             for expiry in expirations[:3]:
-                opt_chain = ticker_obj.option_chain(expiry)
+                opt_chain = t.option_chain(expiry)
                 puts = opt_chain.puts.copy()
                 if puts.empty:
                     continue
@@ -148,13 +144,13 @@ def run_scan():
                 otm_puts = puts[puts["strike"] < current_price].copy()
 
                 otm_puts["预估保证金"] = otm_puts["strike"] * 100
-                otm_puts = otm_puts[otm_puts["预估保证金"] <= max_budget]
+                otm_puts = otm_puts[otm_puts["预估保证金"] <= max_budget_val]
 
                 otm_puts["volume"] = otm_puts["volume"].fillna(0)
                 otm_puts["openInterest"] = otm_puts["openInterest"].fillna(0)
                 otm_puts = otm_puts[
-                    (otm_puts["volume"] >= min_volume)
-                    & (otm_puts["openInterest"] >= min_open_interest)
+                    (otm_puts["volume"] >= min_vol_val)
+                    & (otm_puts["openInterest"] >= min_oi_val)
                 ]
 
                 if otm_puts.empty:
@@ -166,7 +162,8 @@ def run_scan():
                     otm_puts["bid_ask_spread"] / otm_puts["ask"],
                     1.0,
                 )
-                otm_puts = otm_puts[otm_puts["spread_ratio"] <= 0.35]
+                # 放宽休市期间的价差风控门槛到 45%
+                otm_puts = otm_puts[otm_puts["spread_ratio"] <= 0.45]
 
                 otm_puts["权利金(Mid)"] = (
                     otm_puts["bid"] + otm_puts["ask"]
@@ -180,7 +177,7 @@ def run_scan():
                     otm_puts["bid"], otm_puts["权利金(Mid)"] - 0.01
                 )
 
-                otm_puts["股票代码"] = symbol
+                otm_puts["股票代码"] = sym
                 otm_puts["到期日"] = expiry
                 otm_puts["DTE"] = dte
                 otm_puts["股价"] = current_price
@@ -205,17 +202,14 @@ def run_scan():
                     )
 
                 otm_puts = otm_puts[
-                    (otm_puts["行权概率(%)"] <= 35.0)
-                    & (otm_puts["安全边际(%)"] >= 2.0)
+                    (otm_puts["行权概率(%)"] <= 40.0)
+                    & (otm_puts["安全边际(%)"] >= 1.5)
                 ]
 
                 if otm_puts.empty:
                     continue
 
-                otm_puts["财报预警"] = check_earnings_warning(
-                    ticker_obj, expiry
-                )
-
+                otm_puts["财报预警"] = check_earnings_warning(t, expiry)
                 otm_puts["评估值"] = (
                     otm_puts["年化收益率(%)"]
                     * otm_puts["安全边际(%)"]
@@ -227,22 +221,34 @@ def run_scan():
             continue
 
     if not all_opportunities:
-        st.error(
-            "😭 在当前风控与预算条件下未扫出期权，建议适当提高【单笔预算上限】或微调参数。"
-        )
-        return
+        return None
 
     result_df = pd.concat(all_opportunities, ignore_index=True)
-    result_df = result_df.sort_values(by="评估值", ascending=False).head(15)
+    return result_df.sort_values(by="评估值", ascending=False).head(15)
 
-    # 存储到 Session State 避免交互变空白
-    st.session_state["scan_results"] = result_df
+
+def run_scan():
+    with st.spinner(
+        "🤖 正在为您安全扫盘（已启用防频控缓存与平滑抓取，请稍候约 15 秒）..."
+    ):
+        res = fetch_all_data(
+            min_price, max_price, max_budget, min_volume, min_open_interest
+        )
+        if res is None or res.empty:
+            st.error(
+                "😭 暂时未扫出期权数据。这通常是因为 Yahoo 数据源被临时限流或休市期间挂单为空，请尝试将左侧【最低成交量】设为 0 后重试。"
+            )
+        else:
+            st.session_state["scan_results"] = res
 
 
 if btn_scan:
     run_scan()
 
-if "scan_results" in st.session_state and st.session_state["scan_results"] is not None:
+if (
+    "scan_results" in st.session_state
+    and st.session_state["scan_results"] is not None
+):
     result_df = st.session_state["scan_results"]
 
     # 1. 散点图
@@ -272,7 +278,9 @@ if "scan_results" in st.session_state and st.session_state["scan_results"] is no
     # 2. 组合现金流计算器
     st.markdown("---")
     st.subheader("💰 拟合组合现金流计算器")
-    st.caption("在下方多选您看中的标的，系统将自动汇总您的资金占用与即时现金收入：")
+    st.caption(
+        "在下方多选您看中的标的，系统将自动汇总您的资金占用与即时现金收入："
+    )
 
     options_map = {}
     options_list = []
