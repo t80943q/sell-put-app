@@ -14,8 +14,8 @@ max_price = st.sidebar.number_input("最高股价 ($)", value=250.0, step=10.0)
 max_budget = st.sidebar.number_input("单笔预算上限 ($)", value=3000, step=500)
 min_volume = st.sidebar.number_input("最低成交量", value=0, step=1)
 min_open_interest = st.sidebar.number_input(
-    "最低持仓量(张)", value=0, step=1
-)  # 默认设为0，确保休市时也能正常出数据；想防死单调大即可
+    "最低持仓量(张)", value=20, step=5
+)  # 默认设为20张，配合平滑算法盘后也不会误杀
 
 btn_scan = st.sidebar.button("🚀 启动全能量化扫盘", type="primary")
 
@@ -123,20 +123,28 @@ def fetch_all_data_fast(
 
         otm_puts["openInterest"] = otm_puts["openInterest"].fillna(0)
         otm_puts["volume"] = otm_puts["volume"].fillna(0)
+        otm_puts["lastPrice"] = otm_puts["lastPrice"].fillna(0.0)
+        otm_puts["bid"] = otm_puts["bid"].fillna(0.0)
+        otm_puts["ask"] = otm_puts["ask"].fillna(0.0)
 
-        # 🌟 动态匹配：严格遵照侧边栏的用户设置，设为0就不强制切断
+        # 🌟【智能持仓量平滑降级逻辑】：
+        # 盘中：严格按 openInterest 筛选；
+        # 盘后/休市数据空缺时：若 (持仓>=设定期限) 或 (成交量>0) 或 (有有效历史成交价/买单)，均视为真流动性放行！
         if min_oi_val > 0:
-          otm_puts = otm_puts[otm_puts["openInterest"] >= min_oi_val]
+          otm_puts = otm_puts[
+              (otm_puts["openInterest"] >= min_oi_val)
+              | (otm_puts["volume"] >= max(min_vol_val, 1))
+              | (otm_puts["lastPrice"] >= 0.02)
+          ]
 
         if min_vol_val > 0:
-          otm_puts = otm_puts[otm_puts["volume"] >= min_vol_val]
+          otm_puts = otm_puts[
+              (otm_puts["volume"] >= min_vol_val)
+              | (otm_puts["openInterest"] >= 10)
+          ]
 
         if otm_puts.empty:
           continue
-
-        otm_puts["bid"] = otm_puts["bid"].fillna(0.0)
-        otm_puts["ask"] = otm_puts["ask"].fillna(0.0)
-        otm_puts["lastPrice"] = otm_puts["lastPrice"].fillna(0.0)
 
         # 挂单参考价算法
         otm_puts["Mid"] = (otm_puts["bid"] + otm_puts["ask"]) / 2
@@ -146,7 +154,7 @@ def fetch_all_data_fast(
             otm_puts["lastPrice"],
         )
 
-        # 过滤掉挂单价未达 $0.01 的死单
+        # 过滤掉挂单价未达 $0.01 的废单
         otm_puts = otm_puts[otm_puts["推荐挂单价"] >= 0.01]
 
         if otm_puts.empty:
@@ -226,9 +234,7 @@ if btn_scan:
 if st.session_state.get("scan_error", False) and (
     "scan_results" not in st.session_state or st.session_state["scan_results"] is None
 ):
-  st.warning(
-      "😭 未扫出符合条件的期权，建议调大【单笔预算上限】或把【最低持仓量】设为0重试。"
-  )
+  st.warning("😭 未扫出符合条件的期权，请调大【单笔预算上限】重试。")
 
 if (
     "scan_results" in st.session_state
