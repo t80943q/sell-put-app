@@ -1,37 +1,50 @@
-import time
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 import yfinance as yf
 
-st.set_page_config(page_title="Sell Put 终极量化终端 3.0", layout="wide")
-st.title("🚀 Sell Put 智能量化终端 3.0 (含热门 ETF 专区)")
+st.set_page_config(
+    page_title="Sell Put 终极量化终端 3.0 (七姐妹+ETF全集)", layout="wide"
+)
+st.title("🚀 Sell Put 智能量化终端 3.0 (科技七姐妹 + 黄金 ETF 旗舰版)")
 
 # ================= 侧边栏风控设置 =================
 st.sidebar.header("⚙️ 筛选风控与预算")
 min_price = st.sidebar.number_input("最低股价 ($)", value=5.0, step=1.0)
-max_price = st.sidebar.number_input("最高股价 ($)", value=150.0, step=5.0)
-max_budget = st.sidebar.number_input("单笔预算上限 ($)", value=15000, step=500)
-min_volume = st.sidebar.number_input("最低成交量", value=5, step=1)
+# 调高最高股价和预算上限，以完美容纳科技七姐妹（如 META, MSFT, NVDA 等）
+max_price = st.sidebar.number_input("最高股价 ($)", value=600.0, step=10.0)
+max_budget = st.sidebar.number_input(
+    "单笔预算上限 ($)", value=50000, step=1000
+)
+min_volume = st.sidebar.number_input("最低成交量", value=10, step=1)
 min_open_interest = st.sidebar.number_input("最低持仓量", value=20, step=5)
 
 btn_scan = st.sidebar.button("🚀 启动 3.0 全能量化扫盘", type="primary")
 
-# 🌟 43 个高流动性热门美股个股 + 核心 ETF 标的池
+# 🌟 50 个全网最高流动性标的池：科技七姐妹 + 黄金 ETF + 热门高弹性科技股
 target_pool = [
-    # 🆕 8 个适合做 Sell Put 的核心 ETF 标的
-    "SOXL",  # 3倍做多半导体（高波动高年化）
+    # 👑 科技七姐妹 (Magnificent 7)
+    "AAPL",  # 苹果
+    "MSFT",  # 微软
+    "NVDA",  # 英伟达
+    "GOOGL",  # 谷歌
+    "AMZN",  # 亚马逊
+    "META",  # Meta
+    "TSLA",  # 特斯拉
+    # 🛡️ 核心 ETF 专区
+    "SOXL",  # 3倍做多半导体
     "TQQQ",  # 3倍做多纳斯达克100
     "LABU",  # 3倍做多生物医药
-    "IWM",   # 罗素2000小盘股大盘
-    "QQQ",   # 纳斯达克100大盘
-    "SPY",   # 标普500大盘
-    "TLT",   # 20年期+美国国债
-    "SLV",   # 白银ETF
-    # 热门个股
+    "IWM",  # 罗素2000小盘股大盘
+    "QQQ",  # 纳斯达克100大盘
+    "SPY",  # 标普500大盘
+    "TLT",  # 20年期+美国国债
+    "SLV",  # 白银ETF
+    # 热门成长与高流动性个股
     "PLTR",
     "HOOD",
+    "AMD",
     "SOFI",
     "F",
     "NIO",
@@ -55,9 +68,6 @@ target_pool = [
     "BABA",
     "PDD",
     "JD",
-    "NVDA",
-    "TSLA",
-    "AMD",
     "SQ",
     "UBER",
     "RIOT",
@@ -68,7 +78,6 @@ target_pool = [
 ]
 
 
-# 辅助函数：检测财报日预警 (ETF 无财报，会自动标记安全)
 def check_earnings_warning(ticker_obj, expiry_str):
     try:
         cal = ticker_obj.calendar
@@ -92,12 +101,11 @@ def check_earnings_warning(ticker_obj, expiry_str):
     return "✅ 安全(无预警)"
 
 
-def scan_options_v3():
-    st.info("🤖 正在为您全网扫描、分析财报风险并计算最佳挂单价...")
+def run_scan():
+    st.info("🤖 正在为您全网扫描七姐妹、ETF及热门标的期权链...")
     progress_bar = st.progress(0)
     final_symbols = []
 
-    # 1. 股价区间过滤
     total_stocks = len(target_pool)
     for idx, sym in enumerate(target_pool):
         progress_bar.progress((idx + 1) / total_stocks)
@@ -121,7 +129,6 @@ def scan_options_v3():
 
     all_opportunities = []
 
-    # 2. 期权链深度分析
     for symbol, current_price, ticker_obj in final_symbols:
         try:
             expirations = ticker_obj.options
@@ -140,11 +147,9 @@ def scan_options_v3():
 
                 otm_puts = puts[puts["strike"] < current_price].copy()
 
-                # 保证金限制
                 otm_puts["预估保证金"] = otm_puts["strike"] * 100
                 otm_puts = otm_puts[otm_puts["预估保证金"] <= max_budget]
 
-                # 活跃度过滤
                 otm_puts["volume"] = otm_puts["volume"].fillna(0)
                 otm_puts["openInterest"] = otm_puts["openInterest"].fillna(0)
                 otm_puts = otm_puts[
@@ -155,7 +160,6 @@ def scan_options_v3():
                 if otm_puts.empty:
                     continue
 
-                # 价差风控 (<= 35%)
                 otm_puts["bid_ask_spread"] = otm_puts["ask"] - otm_puts["bid"]
                 otm_puts["spread_ratio"] = np.where(
                     otm_puts["ask"] > 0,
@@ -164,7 +168,6 @@ def scan_options_v3():
                 )
                 otm_puts = otm_puts[otm_puts["spread_ratio"] <= 0.35]
 
-                # 价格评估
                 otm_puts["权利金(Mid)"] = (
                     otm_puts["bid"] + otm_puts["ask"]
                 ) / 2
@@ -173,7 +176,6 @@ def scan_options_v3():
                 if otm_puts.empty:
                     continue
 
-                # 智能推荐挂单价
                 otm_puts["推荐挂单价"] = np.maximum(
                     otm_puts["bid"], otm_puts["权利金(Mid)"] - 0.01
                 )
@@ -192,7 +194,6 @@ def scan_options_v3():
                     * 100
                 )
 
-                # 行权概率 (Delta)
                 if (
                     "delta" in otm_puts.columns
                     and not otm_puts["delta"].isna().all()
@@ -211,7 +212,6 @@ def scan_options_v3():
                 if otm_puts.empty:
                     continue
 
-                # 财报风险监测
                 otm_puts["财报预警"] = check_earnings_warning(
                     ticker_obj, expiry
                 )
@@ -228,16 +228,24 @@ def scan_options_v3():
 
     if not all_opportunities:
         st.error(
-            "😭 在当前风控与预算条件下未扫出期权，建议适当微调侧边栏参数。"
+            "😭 在当前风控与预算条件下未扫出期权，建议适当提高【单笔预算上限】或微调参数。"
         )
         return
 
     result_df = pd.concat(all_opportunities, ignore_index=True)
     result_df = result_df.sort_values(by="评估值", ascending=False).head(15)
 
+    # 存储到 Session State 避免交互变空白
     st.session_state["scan_results"] = result_df
 
-    # ------------------ 2.0 可视化图表 ------------------
+
+if btn_scan:
+    run_scan()
+
+if "scan_results" in st.session_state and st.session_state["scan_results"] is not None:
+    result_df = st.session_state["scan_results"]
+
+    # 1. 散点图
     st.subheader("📊 收益 vs 风险 离散分布图")
     fig = px.scatter(
         result_df,
@@ -261,15 +269,17 @@ def scan_options_v3():
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    # ------------------ 3.0 组合现金流计算器 ------------------
+    # 2. 组合现金流计算器
     st.markdown("---")
     st.subheader("💰 拟合组合现金流计算器")
     st.caption("在下方多选您看中的标的，系统将自动汇总您的资金占用与即时现金收入：")
 
-    options_list = [
-        f"{row['股票代码']} | {row['到期日']} | 行权价:${row['strike']:.2f} | 预估单手保证金:${row['预估保证金']:,.0f} | 权利金:${row['权利金(Mid)'] * 100:.0f}"
-        for _, row in result_df.iterrows()
-    ]
+    options_map = {}
+    options_list = []
+    for idx, row in result_df.iterrows():
+        label = f"[{row['股票代码']}] {row['到期日']} | 行权价:${row['strike']:.2f} | 保证金:${row['预估保证金']:,.0f} | 权利金:${row['权利金(Mid)'] * 100:.0f}"
+        options_list.append(label)
+        options_map[label] = row
 
     selected_opts = st.multiselect(
         "选择准备同时操作的 Sell Put 组合：", options_list
@@ -280,30 +290,30 @@ def scan_options_v3():
         total_cash = 0
         selected_codes = []
 
-        for opt in selected_opts:
-            code = opt.split(" | ")[0]
-            expiry = opt.split(" | ")[1]
-            matched = result_df[
-                (result_df["股票代码"] == code)
-                & (result_df["到期日"] == expiry)
-            ].iloc[0]
-
+        for label in selected_opts:
+            matched = options_map[label]
             total_margin += matched["预估保证金"]
             total_cash += matched["权利金(Mid)"] * 100
-            selected_codes.append(f"{code} (${matched['strike']})")
+            selected_codes.append(
+                f"{matched['股票代码']} (${matched['strike']})"
+            )
 
         c1, c2, c3 = st.columns(3)
         c1.metric("🔒 选中组合需要资金 (总保证金)", f"${total_margin:,.0f}")
         c2.metric(
             "💵 即刻落袋权利金 (现金流)",
             f"${total_cash:,.2f}",
-            delta=f"整体回报率 {(total_cash / total_margin) * 100:.2f}%",
+            delta=(
+                f"整体回报率 {(total_cash / total_margin) * 100:.2f}%"
+                if total_margin > 0
+                else "0%"
+            ),
         )
         c3.metric("🎯 包含标的数量", f"{len(selected_codes)} 只标的")
 
     st.markdown("---")
 
-    # ------------------ 数据列表 ------------------
+    # 3. 详细数据表
     st.subheader("📋 详细数据与实盘挂单指南")
     display_df = pd.DataFrame(
         {
@@ -329,7 +339,3 @@ def scan_options_v3():
     )
 
     st.dataframe(display_df, use_container_width=True, hide_index=True)
-
-
-if btn_scan:
-    scan_options_v3()
