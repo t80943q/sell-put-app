@@ -1,3 +1,4 @@
+import time
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -5,7 +6,7 @@ import streamlit as st
 import yfinance as yf
 
 st.set_page_config(page_title="Sell Put 4.0 机构级智能终端", layout="wide")
-st.title("🚀 Sell Put 智能量化终端 4.0 (IV Rank & 财报避险增强版)")
+st.title("🚀 Sell Put 智能量化终端 4.0 (IV Rank & 防限流稳定版)")
 
 # ================= 侧边栏风控设置 =================
 st.sidebar.header("⚙️ 筛选风控与策略模式")
@@ -13,9 +14,11 @@ min_price = st.sidebar.number_input("最低股价 ($)", value=2.0, step=1.0)
 max_price = st.sidebar.number_input("最高股价 ($)", value=250.0, step=10.0)
 max_budget = st.sidebar.number_input("单笔预算上限 ($)", value=3000, step=500)
 min_volume = st.sidebar.number_input("最低成交量", value=0, step=1)
-min_open_interest = st.sidebar.number_input("最低持仓量(张)", value=20, step=5)
+min_open_interest = st.sidebar.number_input(
+    "最低持仓量(张)", value=20, step=5
+)
 
-# 🌟 新增财报避险开关
+# 财报避险开关
 filter_earnings = st.sidebar.checkbox(
     "🛡️ 开启财报避险 (隐藏跨财报期权)", value=True
 )
@@ -75,7 +78,7 @@ def check_earnings_warning(ticker_obj, expiry_str):
   return False, "✅ 安全(无预警)"
 
 
-# 🌟 快速估算 IV Rank 逻辑
+# IV Status
 def get_iv_rank_status(implied_vol):
   iv_val = implied_vol * 100 if implied_vol else 0
   if iv_val >= 70:
@@ -88,6 +91,8 @@ def get_iv_rank_status(implied_vol):
     return f"🧊 偏低({iv_val:.0f}%)"
 
 
+# 🌟 加载数据（带 10 分钟平滑缓存，既保证实时性又防止高频刷爆 IP）
+@st.cache_data(ttl=600, show_spinner=False)
 def fetch_all_data_v4(
     min_price_val,
     max_price_val,
@@ -98,14 +103,11 @@ def fetch_all_data_v4(
 ):
   all_opportunities = []
 
-  progress_bar = st.progress(0)
-  status_text = st.empty()
-
   for idx, sym in enumerate(target_pool):
-    progress_bar.progress((idx + 1) / len(target_pool))
-    status_text.text(f"🔍 正在深度剖析标的: {sym} ({idx+1}/{len(target_pool)})")
-
     try:
+      # 🌟 防封锁微小缓冲
+      time.sleep(0.05)
+
       t = yf.Ticker(sym)
       hist = t.history(period="1d")
       if hist.empty:
@@ -120,10 +122,9 @@ def fetch_all_data_v4(
         continue
 
       for expiry in expirations[:3]:
-        # 财报避险模式校验
         has_earnings, earnings_label = check_earnings_warning(t, expiry)
         if avoid_earnings and has_earnings:
-          continue  # 避险模式下直接剔除财报周期权
+          continue
 
         opt_chain = t.option_chain(expiry)
         puts = opt_chain.puts.copy()
@@ -153,7 +154,6 @@ def fetch_all_data_v4(
             0.0
         )
 
-        # 智能平滑校验
         if min_oi_val > 0:
           otm_puts = otm_puts[
               (otm_puts["openInterest"] >= min_oi_val)
@@ -164,7 +164,6 @@ def fetch_all_data_v4(
         if otm_puts.empty:
           continue
 
-        # 挂单价算法
         otm_puts["Mid"] = (otm_puts["bid"] + otm_puts["ask"]) / 2
         otm_puts["推荐挂单价"] = np.where(
             otm_puts["bid"] > 0,
@@ -213,7 +212,6 @@ def fetch_all_data_v4(
             get_iv_rank_status
         )
 
-        # 算法综合评分
         otm_puts["评估值"] = (
             otm_puts["年化收益率(%)"]
             * otm_puts["安全边际(%)"]
@@ -225,9 +223,6 @@ def fetch_all_data_v4(
     except Exception:
       continue
 
-  progress_bar.empty()
-  status_text.empty()
-
   if not all_opportunities:
     return None
 
@@ -237,26 +232,27 @@ def fetch_all_data_v4(
 
 # ------------------ 页面控制与渲染 ------------------
 if btn_scan:
-  res = fetch_all_data_v4(
-      min_price,
-      max_price,
-      max_budget,
-      min_volume,
-      min_open_interest,
-      filter_earnings,
-  )
-  if res is None or res.empty:
-    st.session_state["scan_error"] = True
-    st.session_state["scan_results"] = None
-  else:
-    st.session_state["scan_error"] = False
-    st.session_state["scan_results"] = res
+  with st.spinner("🤖 正在为您深度扫盘，请稍候..."):
+    res = fetch_all_data_v4(
+        min_price,
+        max_price,
+        max_budget,
+        min_volume,
+        min_open_interest,
+        filter_earnings,
+    )
+    if res is None or res.empty:
+      st.session_state["scan_error"] = True
+      st.session_state["scan_results"] = None
+    else:
+      st.session_state["scan_error"] = False
+      st.session_state["scan_results"] = res
 
 if st.session_state.get("scan_error", False) and (
     "scan_results" not in st.session_state or st.session_state["scan_results"] is None
 ):
   st.warning(
-      "😭 未扫出符合条件的期权，可尝试取消勾选【财报避险】或调大【单笔预算上限】。"
+      "😭 暂时未扫出结果，可能触发了 Yahoo 频次限制，请等待 2 分钟后再试，或取消勾选【财报避险】。"
   )
 
 if (
@@ -352,7 +348,6 @@ if (
 
   st.dataframe(display_df, use_container_width=True, hide_index=True)
 
-  # 🌟 4.0 独家功能：一键生成券商实盘快捷指令
   st.markdown("---")
   st.subheader("⚡ 实盘快捷挂单指令 (支持一键复制到券商/笔记)")
 
