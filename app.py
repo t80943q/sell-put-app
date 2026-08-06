@@ -1,46 +1,51 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
 import numpy as np
 import datetime
 import requests
-from random_user_agent.user_agent import UserAgent
-from random_user_agent.params import SoftwareName, OperatingSystem
+
+# 引入 curl_cffi 进行 Chrome 浏览器 TLS 指纹伪装（彻底绕过 Yahoo 对 Streamlit Cloud 的封锁）
+try:
+    from curl_cffi import requests as curl_requests
+    HAS_CURL_CFFI = True
+except ImportError:
+    HAS_CURL_CFFI = False
 
 # ==============================================================================
-# 1. 核心反爬/伪装机制 (骗过 Yahoo Finance 频控与 Cloud IP 拦截)
+# 1. 核心底层突破：Yahoo 官方 API Direct Session + Cookie/Crumb 自动签发 + TLS 伪装
 # ==============================================================================
 @st.cache_resource(ttl=1800)
-def get_bypass_session():
-    """生成具备动态 Header 伪装能力的 requests Session 以绕过 Yahoo Finance 限制"""
-    session = requests.Session()
+def get_yahoo_session_and_crumb():
+    """使用 curl_cffi 伪装 Chrome 浏览器指纹，获取合法 Session 与 Crumb"""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://finance.yahoo.com/",
+    }
     
-    software_names = [SoftwareName.CHROME.value, SoftwareName.EDGE.value]
-    operating_systems = [OperatingSystem.WINDOWS.value, OperatingSystem.MAC.value]
-    user_agent_rotator = UserAgent(software_names=software_names, operating_systems=operating_systems, limit=100)
-    
-    random_ua = user_agent_rotator.get_random_user_agent()
-    
-    session.headers.update({
-        'User-Agent': random_ua,
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'DNT': '1',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none',
-        'Sec-Fetch-User': '?1',
-        'Referer': 'https://finance.yahoo.com/',
-    })
-    return session
-
-bypass_session = get_bypass_session()
+    if HAS_CURL_CFFI:
+        # 使用 chrome120 浏览器指纹骗过雅虎反爬
+        session = curl_requests.Session(impersonate="chrome120")
+    else:
+        session = requests.Session()
+        session.headers.update(headers)
+        
+    crumb = None
+    try:
+        # 1. 激活凭证
+        session.get("https://fc.yahoo.com", timeout=5)
+        # 2. 签发访问 Crumb
+        r = session.get("https://query2.finance.yahoo.com/v1/test/getquotes", timeout=5)
+        if r.status_code == 200 and len(r.text) < 30:
+            crumb = r.text.strip()
+    except Exception:
+        pass
+        
+    return session, crumb
 
 # ==============================================================================
-# 2. 页面全局配置与 UI 样式设定
+# 2. 页面全局配置
 # ==============================================================================
 st.set_page_config(
     page_title="Sell Put 智能量化终端 4.0",
@@ -51,48 +56,27 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-    .main-title {
-        font-size: 2.2rem;
-        font-weight: 700;
-        color: #1E293B;
-        margin-bottom: 0.5rem;
-    }
-    .sub-title {
-        font-size: 1rem;
-        color: #64748B;
-        margin-bottom: 1.5rem;
-    }
-    .metric-card {
-        background-color: #F8FAFC;
-        border: 1px solid #E2E8F0;
-        border-radius: 8px;
-        padding: 12px;
-        text-align: center;
-    }
-    .stDataFrame {
-        border-radius: 8px;
-        overflow: hidden;
-    }
+    .main-title { font-size: 2.0rem; font-weight: 700; color: #1E293B; margin-bottom: 0.5rem; }
+    .stDataFrame { border-radius: 8px; overflow: hidden; }
 </style>
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="main-title">🚀 Sell Put 智能量化终端 4.0 (老股民实盘臻选·黄金平衡版)</div>', unsafe_allow_html=True)
 
 # ==============================================================================
-# 3. 股票池内置预设
+# 3. 股票池预设 (重写：100% 还原低门槛/小盘练手经典标的)
 # ==============================================================================
 PRESET_WATCHLISTS = {
-    "核心臻选优质标的池 (默认推荐)": [
-        'AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA', 'AMD', 'INTC', 'PLTR',
-        'QCOM', 'NFLX', 'BABA', 'PDD', 'DIS', 'BA', 'COIN', 'MARA', 'NIO', 'XPEV',
-        'UBER', 'ABNB', 'SQ', 'PYPL', 'SHOP', 'HOOD', 'SOFI', 'SMCI', 'ARM'
-    ],
-    "科技巨头 & 高流动性 (Mega Tech)": [
-        'AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA', 'AVGO', 'COST', 'ORCL'
+    "🌱 小盘低股价练手/黄金实盘池 (默认推荐)": [
+        'RIOT', 'CLSK', 'F', 'LCID', 'MARA', 'SOFI', 'PLTR', 'HOOD', 'NIO', 'XPEV', 
+        'AFRM', 'UPST', 'IONQ', 'RBLX', 'DKNG', 'PATH', 'SOUN', 'AAL', 'BAC', 'INTC'
     ],
     "高波动率 / 高年化收益 (High IV Growth)": [
-        'PLTR', 'COIN', 'MARA', 'RIOT', 'SMCI', 'ARM', 'HOOD', 'SOFI', 'DKNG', 'U',
+        'RIOT', 'CLSK', 'MARA', 'COIN', 'SMCI', 'ARM', 'HOOD', 'SOFI', 'DKNG', 'U',
         'AFRM', 'UPST', 'IONQ', 'RBLX', 'MSTR', 'CVNA', 'SNOW', 'PATH', 'AI', 'ROKU'
+    ],
+    "科技巨头 & 大盘蓝筹 (Mega Tech & Blue Chips)": [
+        'AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA', 'AMD', 'INTC', 'QCOM'
     ],
     "中概股 & 价值回升 (China Concept)": [
         'BABA', 'PDD', 'BIDU', 'JD', 'NIO', 'XPEV', 'LI', 'FUTU', 'TME', 'EDU'
@@ -100,7 +84,7 @@ PRESET_WATCHLISTS = {
 }
 
 # ==============================================================================
-# 4. 侧边栏交互 (风控与策略参数)
+# 4. 侧边栏交互 (风控与策略参数 - 保持原有逻辑不变)
 # ==============================================================================
 with st.sidebar:
     st.header("⚙️ 筛选风控与策略模式")
@@ -130,13 +114,13 @@ with st.sidebar:
     min_dte = st.number_input("最小到期天数 (DTE)", value=7, step=1, min_value=1)
     max_dte = st.number_input("最大到期天数 (DTE)", value=60, step=5, min_value=7)
     
-    earnings_avoid = st.checkbox("开启财报避险 (隐藏跨财报期权)", value=True, help="剔除在期权到期日前即将发布财报的股票，降低剧烈波动风险")
+    earnings_avoid = st.checkbox("开启财报避险 (隐藏跨财报期权)", value=True, help="剔除在期权到期日前即将发布财报的股票")
     
     st.markdown("---")
     start_btn = st.button("🚀 启动 4.0 全能量化扫描", type="primary", use_container_width=True)
 
 # ==============================================================================
-# 5. 数据抓取与解析引擎
+# 5. 极速扫描与解析引擎
 # ==============================================================================
 def get_combined_watchlist():
     base_list = PRESET_WATCHLISTS[selected_pool_name]
@@ -147,101 +131,91 @@ def get_combined_watchlist():
         combined = base_list
     return combined
 
-def fetch_earnings_date(ticker_obj):
-    """获取标的下一期财报日期"""
-    try:
-        calendar = ticker_obj.calendar
-        if isinstance(calendar, dict) and 'Earnings Date' in calendar:
-            e_dates = calendar['Earnings Date']
-            if e_dates and len(e_dates) > 0:
-                return pd.to_datetime(e_dates[0]).date()
-        elif isinstance(calendar, pd.DataFrame) and not calendar.empty:
-            if 'Earnings Date' in calendar.index:
-                e_dates = calendar.loc['Earnings Date'].values
-                if len(e_dates) > 0:
-                    return pd.to_datetime(e_dates[0]).date()
-    except Exception:
-        pass
-    return None
-
-def analyze_ticker_options(symbol, budget, min_vol, min_open_int, min_b_price, min_ann_ret, min_d, max_d, avoid_earn):
-    """单只股票的深度 Sell Put 筛选算法"""
+def fetch_ticker_options_direct(symbol, session, crumb, budget, min_vol, min_open_int, min_b_price, min_ann_ret, min_d, max_d, avoid_earn):
+    """采用 curl_cffi 直连 API 解析"""
     records = []
     try:
-        ticker = yf.Ticker(symbol, session=bypass_session)
-        
-        fast_info = ticker.fast_info
-        current_price = getattr(fast_info, 'last_price', None)
-        if current_price is None or np.isnan(current_price) or current_price <= 0:
-            hist = ticker.history(period="2d")
-            if not hist.empty:
-                current_price = float(hist['Close'].iloc[-1])
-            else:
-                return records
-
-        max_allowed_price = (budget / 100.0) * 1.35
-        if current_price < 2.0 or current_price > max_allowed_price:
-            return records
-
-        dates = ticker.options
-        if not dates:
-            return records
-
-        next_earnings_date = None
-        if avoid_earn:
-            next_earnings_date = fetch_earnings_date(ticker)
-
-        today = datetime.date.today()
-
-        for d_str in dates:
-            exp_date = datetime.datetime.strptime(d_str, "%Y-%m-%d").date()
-            dte = (exp_date - today).days
-
-            if dte < min_d or dte > max_d:
-                continue
-
-            if avoid_earn and next_earnings_date:
-                if today < next_earnings_date <= exp_date:
-                    continue
-
-            try:
-                opt_chain = ticker.option_chain(d_str)
-                puts = opt_chain.puts
-                if puts.empty:
-                    continue
-            except Exception:
-                continue
-
-            max_strike_price = budget / 100.0
+        url = f"https://query2.finance.yahoo.com/v7/finance/options/{symbol}"
+        params = {}
+        if crumb:
+            params['crumb'] = crumb
             
-            valid_puts = puts[
-                (puts['strike'] <= max_strike_price) &
-                (puts['strike'] < current_price) &
-                (puts['bid'] >= min_b_price) &
-                (puts['volume'] >= min_vol) &
-                (puts['openInterest'] >= min_open_int)
-            ]
+        res = session.get(url, params=params, timeout=8)
+        if res.status_code != 200:
+            return records
+            
+        data = res.json()
+        result_list = data.get('optionChain', {}).get('result', [])
+        if not result_list:
+            return records
+            
+        result = result_list[0]
+        quote = result.get('quote', {})
+        
+        # 获取标的现价
+        current_price = quote.get('regularMarketPrice') or quote.get('postMarketPrice') or quote.get('preMarketPrice')
+        if not current_price or current_price < 2.0 or current_price > (budget / 100.0) * 1.35:
+            return records
 
-            for _, row in valid_puts.iterrows():
-                strike = float(row['strike'])
-                bid = float(row['bid'])
-                ask = float(row['ask'])
-                volume = int(row['volume']) if not pd.isna(row['volume']) else 0
-                open_interest = int(row['openInterest']) if not pd.isna(row['openInterest']) else 0
-                iv = float(row['impliedVolatility']) if 'impliedVolatility' in row and not pd.isna(row['impliedVolatility']) else 0.0
+        # 财报日期提取
+        earnings_date = None
+        if avoid_earn:
+            earnings_ts = quote.get('earningsTimestamp') or quote.get('earningsTimestampStart')
+            if earnings_ts:
+                earnings_date = datetime.date.fromtimestamp(earnings_ts)
+
+        exp_timestamps = result.get('expirationDates', [])
+        today = datetime.date.today()
+        
+        target_timestamps = []
+        for ts in exp_timestamps:
+            exp_date = datetime.date.fromtimestamp(ts)
+            dte = (exp_date - today).days
+            if min_d <= dte <= max_d:
+                if avoid_earn and earnings_date and (today < earnings_date <= exp_date):
+                    continue
+                target_timestamps.append((ts, exp_date, dte))
+                
+        max_strike_price = budget / 100.0
+
+        for ts, exp_date, dte in target_timestamps:
+            sub_url = f"{url}?date={ts}"
+            sub_res = session.get(sub_url, params=params, timeout=6)
+            if sub_res.status_code != 200:
+                continue
+                
+            sub_data = sub_res.json()
+            sub_options = sub_data.get('optionChain', {}).get('result', [])[0].get('options', [])
+            if not sub_options:
+                continue
+                
+            puts = sub_options[0].get('puts', [])
+            for p in puts:
+                strike = float(p.get('strike', 0))
+                bid = float(p.get('bid', 0))
+                ask = float(p.get('ask', 0))
+                volume = int(p.get('volume', 0) or 0)
+                open_interest = int(p.get('openInterest', 0) or 0)
+                iv = float(p.get('impliedVolatility', 0) or 0)
+
+                # 过滤器条件
+                if strike > max_strike_price or strike >= current_price:
+                    continue
+                if bid < min_b_price or volume < min_vol or open_interest < min_open_int:
+                    continue
+
+                annual_return = (bid / strike) * (365.0 / dte) * 100.0
+                if annual_return < min_ann_ret:
+                    continue
 
                 margin_required = strike * 100.0
                 premium_collected = bid * 100.0
-                annual_return = (bid / strike) * (365.0 / dte) * 100.0
                 safety_buffer = ((current_price - strike) / current_price) * 100.0
-
-                if annual_return < min_ann_ret:
-                    continue
 
                 records.append({
                     "代码": symbol,
                     "标的现价 ($)": round(current_price, 2),
-                    "到期日": d_str,
+                    "到期日": exp_date.strftime("%Y-%m-%d"),
                     "DTE (天)": dte,
                     "行权价 ($)": strike,
                     "安全边际": f"{safety_buffer:.1f}%",
@@ -254,20 +228,20 @@ def analyze_ticker_options(symbol, budget, min_vol, min_open_int, min_b_price, m
                     "成交量 (张)": volume,
                     "持仓量 (张)": open_interest
                 })
-
     except Exception:
         pass
 
     return records
 
 # ==============================================================================
-# 6. 主逻辑渲染与展示
+# 6. 主界面渲染与结果导出
 # ==============================================================================
 if start_btn:
+    session, crumb = get_yahoo_session_and_crumb()
     watchlist = get_combined_watchlist()
     total_tickers = len(watchlist)
     
-    st.write(f"🔍 正在对 **{total_tickers}** 只标的进行多维度深度扫描与反爬防封数据拉取...")
+    st.write(f"🔍 正在对 **{total_tickers}** 只小盘/低股价标的进行 TLS 伪装全能量化扫描...")
     
     progress_bar = st.progress(0)
     status_text = st.empty()
@@ -276,8 +250,10 @@ if start_btn:
     
     for idx, sym in enumerate(watchlist):
         status_text.text(f"正在扫描 [{idx+1}/{total_tickers}]: {sym} ...")
-        res = analyze_ticker_options(
+        res = fetch_ticker_options_direct(
             symbol=sym,
+            session=session,
+            crumb=crumb,
             budget=budget,
             min_vol=min_volume,
             min_open_int=min_oi,
@@ -306,11 +282,9 @@ if start_btn:
         with c2:
             st.metric("精选 Put 策略总数", len(df_res))
         with c3:
-            max_ret = df_res["年化收益率"].max()
-            st.metric("最高年化收益率", f"{max_ret:.2f}%")
+            st.metric("最高年化收益率", f"{df_res['年化收益率'].max():.2f}%")
         with c4:
-            avg_ret = df_res["年化收益率"].mean()
-            st.metric("平均年化收益率", f"{avg_ret:.2f}%")
+            st.metric("平均年化收益率", f"{df_res['年化收益率'].mean():.2f}%")
 
         st.success(f"🎉 扫描完成！共找到 **{len(df_res)}** 条符合风控策略的 Sell Put 合约组合。")
         
@@ -336,10 +310,8 @@ if start_btn:
             """🤖 未找到符合要求的标的！
 
 💡 **建议调整参数再次尝试：**
-1. 适当调大侧边栏 **【单笔预算上限】**（例如调至 $5,000 ~ $10,000）
-2. 降低 **【最低成交量】** 或 **【最低持仓量】**（例如调至 1 ~ 5）
-3. 调低 **【最低年化收益率】**（例如调至 8% ~ 10%）
-4. 切换顶部 **【股票池预设】** 或在自定义框中输入更多高波动性标的（如 PLTR, COIN, TSLA）。"""
+1. 降低侧边栏 **【最低成交量】** 或 **【最低持仓量】**（例如调至 0~1 张，以便在盘前/盘后测试数据）
+2. 调低 **【最低年化收益率】**（例如调至 8% ~ 10%）"""
         )
 else:
     st.info("👈 请在侧边栏配置筛选风控参数，然后点击 **【🚀 启动 4.0 全能量化扫描】** 开始运行。")
