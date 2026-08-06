@@ -7,7 +7,7 @@ import yfinance as yf
 import plotly.express as px
 
 # ==============================================================================
-# 1. 页面配置与全局样式 (适配暗色/亮色主题)
+# 1. 页面配置与全局样式
 # ==============================================================================
 st.set_page_config(page_title="Sell Put 4.0 机构级智能终端", page_icon="🏦", layout="wide")
 
@@ -126,13 +126,11 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
                     premium = bid * 100.0
                     safety_buf = ((current_price - strike) / current_price) * 100.0
                     
-                    # 综合评分 (年化收益 + 安全边际的综合权重)
                     score = round(annual_return + safety_buf, 2)
 
                     yymmdd = exp_date.strftime("%y%m%d")
                     moomoo_code = f"US.{symbol}{yymmdd}P{int(round(strike * 1000)):08d}"
                     
-                    # 生成供多选框使用的唯一标识
                     unique_id = f"[{symbol}] 到期日:{d_str} | 行权价:${strike} | 权利金:${premium:.2f} (年化:{annual_return:.1f}%)"
 
                     records.append({
@@ -192,12 +190,18 @@ with st.sidebar:
     avoid_earn = st.checkbox("开启财报避险 (隐藏跨财报期权)", value=True)
     
     st.markdown("---")
-    if st.button("🧹 清理系统缓存"): st.cache_data.clear()
+    if st.button("🧹 清理系统缓存"): 
+        st.cache_data.clear()
+        if 'scan_df' in st.session_state: del st.session_state['scan_df']
+        if 'diag_logs' in st.session_state: del st.session_state['diag_logs']
+        st.success("缓存与内存会话已清除！")
+        
     start_btn = st.button("🚀 启动 4.0 全能量化扫盘", type="primary", use_container_width=True)
 
 # ==============================================================================
-# 4. 主程序：数据获取与 UI 渲染
+# 4. 主程序：数据持久化存储与 UI 渲染
 # ==============================================================================
+# 点击扫盘按钮时，将数据写入 session_state 保持持久化
 if start_btn:
     base_list = PRESET_WATCHLISTS[selected_pool]
     if custom_tickers.strip():
@@ -222,8 +226,16 @@ if start_btn:
     progress_bar.empty()
 
     if all_res:
-        df = pd.DataFrame(all_res).sort_values(by="综合评分", ascending=False).reset_index(drop=True)
-        
+        st.session_state['scan_df'] = pd.DataFrame(all_res).sort_values(by="综合评分", ascending=False).reset_index(drop=True)
+    else:
+        st.session_state['scan_df'] = pd.DataFrame()
+    st.session_state['diag_logs'] = pd.DataFrame(diag_logs)
+
+# 只要 session_state 里有数据，即使组件重刷，页面也会一直展示
+if 'scan_df' in st.session_state:
+    df = st.session_state['scan_df']
+    
+    if not df.empty:
         # --- 图表区：风险与收益散点图 ---
         fig = px.scatter(
             df, x="安全边际(%)", y="年化收益率(%)", color="财报预警", size="单张权利金($)", hover_name="代码",
@@ -254,24 +266,17 @@ if start_btn:
         # --- 详细数据与实盘挂单指南 ---
         st.markdown('<div class="sub-title">📋 详细数据与实盘挂单指南 (16项核心指标)</div>', unsafe_allow_html=True)
         
-        # 优化显示列序，隐藏 Unique_ID
-        display_cols = [
-            "代码", "现价($)=标的现价", "IV环境", "财报预警", "到期日", "DTE(天)", "行权价($)", 
-            "推荐挂单价(Bid)", "需保证金($)", "单张权利金($)", "综合评分", "年化收益率(%)", 
-            "安全边际(%)", "Delta", "成交量", "持仓量", "Moomoo 代码", "实盘挂单指令"
-        ]
-        # 重命名适配前端表格
         df_display = df.rename(columns={"标的现价": "现价($)"}).drop(columns=["Unique_ID"])
         st.dataframe(df_display, use_container_width=True, height=600)
         
-        # CSV 导出
         csv = df_display.to_csv(index=False).encode('utf-8-sig')
         st.download_button("📥 导出实盘数据为 CSV", data=csv, file_name=f"SellPut_Terminal_{datetime.date.today()}.csv", mime="text/csv")
         
     else:
         st.warning("🤖 未扫描到符合条件的合约，请尝试调低年化收益率或放宽到期日限制。")
 
-    with st.expander("🛠️ 系统底层接口抓取与诊断日志", expanded=False):
-        st.dataframe(pd.DataFrame(diag_logs), use_container_width=True)
+    if 'diag_logs' in st.session_state:
+        with st.expander("🛠️ 系统底层接口抓取与诊断日志", expanded=False):
+            st.dataframe(st.session_state['diag_logs'], use_container_width=True)
 else:
     st.info("👈 请在左侧配置参数，点击【🚀 启动 4.0 全能量化扫盘】。")
