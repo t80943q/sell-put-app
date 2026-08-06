@@ -52,7 +52,7 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
         
         max_allowed_price = (budget / 100.0) * 1.35
         if current_price < 2.0 or current_price > max_allowed_price:
-            diag["排查结论"] = f"⚠️ 现价 (${current_price:.2f}) 超出预算区间"
+            diag["排查结论"] = f"⚠️ 现价 (${current_price:.2f}) 超出单笔预算上限允许的行权价区间"
             return records, diag
 
         try: dates = ticker.options
@@ -149,7 +149,7 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
             except: continue
 
         diag["符合条件合约数"] = len(records)
-        diag["排查结论"] = "✅ 扫描成功" if records else f"⚠️ 找到 {len(dates)} 个到期日，无符合条件合约"
+        diag["排查结论"] = "✅ 扫描成功" if records else f"⚠️ 找到 {len(dates)} 个到期日，全被策略参数过滤 (建议检查财报或调低门槛)"
     except Exception as e:
         diag["排查结论"] = f"❌ 运行异常: {str(e)}"
     return records, diag
@@ -170,16 +170,20 @@ with st.sidebar:
     custom_tickers = st.text_area("✍️ 自定义代码 (空格/逗号分隔)", value="")
     
     st.markdown("---")
-    budget = st.number_input("💵 单笔预算上限 ($)", value=3000, step=500)
+    budget = st.number_input("💵 单笔预算上限 ($)", value=100000, step=5000)
     min_volume = st.number_input("最低成交量 (张)", value=0, step=1)
-    min_oi = st.number_input("最低持仓量 (张)", value=20, step=10)
-    min_bid = st.number_input("最低买一价 (Bid $)", value=0.01, step=0.01) # 默认改为0.01防止误杀
-    min_annual_return = st.number_input("最低年化收益率 (%)", value=5.0, step=0.5)
+    min_oi = st.number_input("最低持仓量 (张)", value=0, step=10)
+    min_bid = st.number_input("最低买一价 (Bid $)", value=0.01, step=0.01) 
+    min_annual_return = st.number_input("最低年化收益率 (%)", value=3.0, step=0.5) 
     
     st.markdown("---")
     min_dte = st.number_input("最小到期天数 (DTE)", value=1, min_value=1)
-    max_dte = st.number_input("最大到期天数 (DTE)", value=60, min_value=1)
-    avoid_earn = st.checkbox("开启财报避险 (隐藏跨财报期权)", value=True)
+    max_dte = st.number_input("最大到期天数 (DTE)", value=180, min_value=1)
+    avoid_earn = st.checkbox("开启财报避险 (隐藏跨财报期权)", value=False)
+    
+    # --- 智能预警系统：当长周期与财报避险冲突时报警 ---
+    if avoid_earn and max_dte > 80:
+        st.warning("⚠️ **策略逻辑冲突警告**：美股每 90 天发一次财报。你将最大天数设为了 180 天，若开启『财报避险』，所有远期合约必将跨越财报日并被系统强制删除！**建议在做长周期时取消勾选此项**。")
     
     st.markdown("---")
     if st.button("🧹 清理系统缓存"): 
@@ -244,11 +248,10 @@ if 'scan_df' in st.session_state:
         c2.markdown(f"""<div class="metric-card"><div class="metric-label">💵 即刻落袋权利金 (现金流)</div><div class="metric-value" style="color:#F59E0B;">${total_premium:,.2f}</div></div>""", unsafe_allow_html=True)
         c3.markdown(f"""<div class="metric-card"><div class="metric-label">📦 包含标的数量</div><div class="metric-value" style="color:#3B82F6;">{len(selected_options)} 只标的</div></div>""", unsafe_allow_html=True)
 
-        # --- 新增：独立展示选中的 Moomoo 代码，自带一键复制按钮 ---
+        # 独立展示选中的 Moomoo 代码，自带一键复制按钮
         if selected_options:
             st.markdown("##### 📝 已选合约 Moomoo 实盘代码 (点击右侧图标一键复制)")
             for _, row in selected_df.iterrows():
-                # 使用 st.code 会在右侧自动生成一个 Copy 按钮
                 st.code(row["Moomoo 代码"], language="text")
 
         st.markdown('<div class="sub-title">📋 详细数据与实盘挂单指南 (16项核心指标)</div>', unsafe_allow_html=True)
