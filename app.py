@@ -6,7 +6,7 @@ import streamlit as st
 import yfinance as yf
 
 st.set_page_config(page_title="Sell Put 4.0 机构级智能终端", layout="wide")
-st.title("🚀 Sell Put 智能量化终端 4.0 (高流动性精简增强版)")
+st.title("🚀 Sell Put 智能量化终端 4.0 (终极全能稳定版)")
 
 
 # ---------------- 🎯 生成 Moomoo 搜索框专属期权代码 ----------------
@@ -22,11 +22,11 @@ min_price = st.sidebar.number_input("最低股价 ($)", value=2.0, step=1.0)
 max_price = st.sidebar.number_input("最高股价 ($)", value=250.0, step=10.0)
 max_budget = st.sidebar.number_input("单笔预算上限 ($)", value=3000, step=500)
 
-st.sidebar.subheader("🌊 严苛买方流动性过滤 (彻底干掉死水合约)")
-min_volume = st.sidebar.number_input("最低成交量(张)", value=20, step=5, help="过滤掉没有实际撮合成交的归零单")
-min_open_interest = st.sidebar.number_input("最低持仓量(张)", value=50, step=10, help="确保有市场关注度和机构深度")
+st.sidebar.subheader("🌊 盘口与买方流动性风控")
+min_volume = st.sidebar.number_input("最低成交量(张)", value=0, step=5, help="盘后建议设为0，盘中可设为10-20")
+min_open_interest = st.sidebar.number_input("最低持仓量(张)", value=30, step=10, help="确保合约具备基本流动性与机构关注度")
 min_bid_price = st.sidebar.number_input(
-    "最低买一出价 (Bid $)", value=0.05, step=0.01, help="买方必须出价至少此金额，彻底干掉Bid=0或0.01的归零废单"
+    "最低买一出价 (Bid $)", value=0.03, step=0.01, help="买方必须出价至少此金额，彻底干掉Bid=0的做市商死水合约"
 )
 
 # 财报避险开关
@@ -138,29 +138,37 @@ def fetch_all_data_v4(
                 otm_puts["volume"] = otm_puts["volume"].fillna(0)
                 otm_puts["bid"] = otm_puts["bid"].fillna(0.0)
                 otm_puts["ask"] = otm_puts["ask"].fillna(0.0)
+                otm_puts["lastPrice"] = otm_puts["lastPrice"].fillna(0.0)
                 otm_puts["impliedVolatility"] = otm_puts["impliedVolatility"].fillna(0.0)
 
-                # ---------------- 🚨 极致严格的流动性清洗 ----------------
-                otm_puts = otm_puts[(otm_puts["bid"] >= min_bid_val) & (otm_puts["ask"] > 0)]
+                # ---------------- 🚨 买方出价与死水黑洞过滤 ----------------
+                # 1. 出价或成交价必须大于设定的最小门槛
+                otm_puts = otm_puts[(otm_puts["bid"] >= min_bid_val) | (otm_puts["lastPrice"] >= min_bid_val)]
 
-                # 严格控制【买卖价差 (Bid-Ask Spread)】
+                # 2. 严格把控买卖价差 (防止点差过大的僵尸单)
                 otm_puts["Spread"] = otm_puts["ask"] - otm_puts["bid"]
-                otm_puts = otm_puts[otm_puts["Spread"] <= np.maximum(0.12, otm_puts["bid"] * 0.85)]
+                otm_puts = otm_puts[otm_puts["Spread"] <= np.maximum(0.15, otm_puts["bid"] * 1.0)]
 
-                # 硬性要求成交量和持仓量同时达标
-                otm_puts = otm_puts[
-                    (otm_puts["openInterest"] >= min_oi_val)
-                    & (otm_puts["volume"] >= min_vol_val)
-                ]
+                # 3. 持仓量 (Open Interest) 过滤
+                if min_oi_val > 0:
+                    otm_puts = otm_puts[otm_puts["openInterest"] >= min_oi_val]
+
+                # 4. 成交量 (Volume) 过滤（兼顾盘后）
+                if min_vol_val > 0:
+                    otm_puts = otm_puts[(otm_puts["volume"] >= min_vol_val) | (otm_puts["openInterest"] >= max(min_oi_val, 50))]
 
                 if otm_puts.empty:
                     continue
 
-                # 基于真实 Bid/Mid 计算推荐限价
+                # 计算推荐限价
                 otm_puts["Mid"] = (otm_puts["bid"] + otm_puts["ask"]) / 2
-                otm_puts["推荐挂单价"] = np.minimum(otm_puts["Mid"], otm_puts["bid"] * 1.10)
+                otm_puts["推荐挂单价"] = np.where(
+                    otm_puts["bid"] > 0,
+                    np.minimum(otm_puts["Mid"], otm_puts["bid"] * 1.15),
+                    otm_puts["lastPrice"]
+                )
 
-                otm_puts = otm_puts[otm_puts["推荐挂单价"] >= min_bid_val]
+                otm_puts = otm_puts[otm_puts["推荐挂单价"] >= 0.01]
 
                 if otm_puts.empty:
                     continue
@@ -170,7 +178,7 @@ def fetch_all_data_v4(
                 otm_puts["DTE"] = dte
                 otm_puts["股价"] = current_price
 
-                # 生成 Moomoo 专属搜素代码（供底部组合解析使用）
+                # 生成 Moomoo 专属代码
                 otm_puts["Moomoo代码"] = otm_puts.apply(
                     lambda r: generate_moomoo_search_code(r["股票代码"], r["到期日"], r["strike"]), axis=1
                 )
@@ -226,7 +234,7 @@ def fetch_all_data_v4(
 
 # ------------------ 页面控制与渲染 ------------------
 if btn_scan:
-    with st.spinner("🤖 正在为您筛选优质且高买方流动性的期权..."):
+    with st.spinner("🤖 正在为您深度扫盘，请稍候..."):
         res = fetch_all_data_v4(
             min_price,
             max_price,
@@ -247,7 +255,7 @@ if st.session_state.get("scan_error", False) and (
     "scan_results" not in st.session_state or st.session_state["scan_results"] is None
 ):
     st.warning(
-        "😭 未找到符合高流动性要求的标的，建议适度调低侧边栏的【最低买一出价】或【最低成交量】。"
+        "😭 未找到符合要求的标的，建议取消勾选【开启财报避险】或将侧边栏【最低买一出价】调为 0.02 再次尝试。"
     )
 
 if (
@@ -352,10 +360,10 @@ if (
     order_lines = []
     for idx, row in result_df.head(5).iterrows():
         moomoo_search_codes.append(row["Moomoo代码"])
-        order_line = f"Moomoo搜素代码: {row['Moomoo代码']} | SELL PUT 1张 | 推荐限价:${row['推荐挂单价']:.2f} (买一价:${row['bid']:.2f}) | 预计年化:{row['年化收益率(%)']:.1f}% | 预估收入:${row['推荐挂单价']*100:.0f}"
+        order_line = f"Moomoo代码: {row['Moomoo代码']} | SELL PUT 1张 | 推荐限价:${row['推荐挂单价']:.2f} (买一价:${row['bid']:.2f}) | 预计年化:{row['年化收益率(%)']:.1f}% | 预估收入:${row['推荐挂单价']*100:.0f}"
         order_lines.append(order_line)
 
-    st.markdown("#### 1️⃣ Moomoo App 搜素代码列表（快捷复制直接在 Moomoo 顶部粘贴搜素）：")
+    st.markdown("#### 1️⃣ Moomoo App 搜索代码列表（快捷复制直接在 Moomoo 顶部粘贴搜索）：")
     st.code("\n".join(moomoo_search_codes), language="text")
 
     st.markdown("#### 2️⃣ 完整挂单指导详情：")
