@@ -149,19 +149,27 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
             except: continue
 
         diag["符合条件合约数"] = len(records)
-        diag["排查结论"] = "✅ 扫描成功" if records else f"⚠️ 找到 {len(dates)} 个到期日，全被策略参数过滤 (建议检查财报或调低门槛)"
+        diag["排查结论"] = "✅ 扫描成功" if records else f"⚠️ 找到 {len(dates)} 个到期日，全被策略参数过滤"
     except Exception as e:
         diag["排查结论"] = f"❌ 运行异常: {str(e)}"
     return records, diag
 
 # ==============================================================================
-# 3. 侧边栏风控与策略模式
+# 3. 侧边栏风控与策略模式 (整合全量股票池)
 # ==============================================================================
+list_growth = ['RIOT', 'CLSK', 'F', 'LCID', 'MARA', 'SOFI', 'PLTR', 'HOOD', 'NIO', 'XPEV', 'AFRM', 'UPST', 'IONQ', 'RBLX', 'DKNG', 'PATH', 'SOUN', 'AAL', 'BAC', 'INTC']
+list_high_iv = ['COIN', 'SMCI', 'ARM', 'U', 'MSTR', 'CVNA', 'SNOW', 'AI', 'ROKU']
+list_etf = ['TQQQ', 'SOXL', 'IWM', 'QQQ', 'SPY', 'ARKK', 'KWEB', 'XLE', 'XLF', 'SMH', 'TLT', 'GDX']
+list_mega = ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA', 'AMD', 'QCOM']
+# 自动去重并合并成全量矩阵
+all_tickers_combined = list(dict.fromkeys(list_growth + list_high_iv + list_etf + list_mega))
+
 PRESET_WATCHLISTS = {
-    "🌱 黄金实盘池 (默认推荐)": ['RIOT', 'CLSK', 'F', 'LCID', 'MARA', 'SOFI', 'PLTR', 'HOOD', 'NIO', 'XPEV', 'AFRM', 'UPST', 'IONQ', 'RBLX', 'DKNG', 'PATH', 'SOUN', 'AAL', 'BAC', 'INTC'],
-    "📈 高波动率 (High IV Growth)": ['COIN', 'SMCI', 'ARM', 'U', 'MSTR', 'CVNA', 'SNOW', 'AI', 'ROKU'],
-    "🏛️ 稳健指数 & 行业 ETF": ['TQQQ', 'SOXL', 'IWM', 'QQQ', 'SPY', 'ARKK', 'KWEB', 'XLE', 'XLF', 'SMH', 'TLT', 'GDX'],
-    "💻 科技巨头 (Mega Tech)": ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA', 'AMD', 'QCOM']
+    "🔥 全矩阵综合股票池 (All-in-One 学习精选)": all_tickers_combined,
+    "🌱 黄金实盘池 (成长与低价股)": list_growth,
+    "📈 高波动率 (High IV Growth)": list_high_iv,
+    "🏛️ 稳健指数 & 行业 ETF": list_etf,
+    "💻 科技巨头 (Mega Tech)": list_mega
 }
 
 with st.sidebar:
@@ -181,9 +189,8 @@ with st.sidebar:
     max_dte = st.number_input("最大到期天数 (DTE)", value=180, min_value=1)
     avoid_earn = st.checkbox("开启财报避险 (隐藏跨财报期权)", value=False)
     
-    # --- 智能预警系统：当长周期与财报避险冲突时报警 ---
     if avoid_earn and max_dte > 80:
-        st.warning("⚠️ **策略逻辑冲突警告**：美股每 90 天发一次财报。你将最大天数设为了 180 天，若开启『财报避险』，所有远期合约必将跨越财报日并被系统强制删除！**建议在做长周期时取消勾选此项**。")
+        st.warning("⚠️ **策略冲突预警**：美股约90天发一次财报，设最大天数为180天时若开启此项，远期合约将因跨财报日被全部过滤！做长周期建议取消勾选。")
     
     st.markdown("---")
     if st.button("🧹 清理系统缓存"): 
@@ -210,7 +217,7 @@ if start_btn:
     all_res, diag_logs = [], []
     
     for idx, sym in enumerate(watchlist):
-        status_text.text(f"正在分析 [{idx+1}/{len(watchlist)}]: {sym} ...")
+        status_text.text(f"正在分析全量数据 [{idx+1}/{len(watchlist)}]: {sym} ...")
         res, diag = fetch_ticker_options_safe(sym, budget, min_volume, min_oi, min_bid, min_annual_return, min_dte, max_dte, avoid_earn)
         all_res.extend(res)
         diag_logs.append(diag)
@@ -227,9 +234,9 @@ if 'scan_df' in st.session_state:
     
     if not df.empty:
         fig = px.scatter(
-            df, x="安全边际(%)", y="年化收益率(%)", color="财报预警", size="单张权利金($)", hover_name="代码",
-            hover_data=["到期日", "行权价($)", "综合评分"], title="📊 标的收益与风险分布 (气泡大小代表权利金)",
-            color_discrete_map={"✅ 安全": "#10B981", "⚠️ 跨财报": "#EF4444"}, template="plotly_dark"
+            df, x="安全边际(%)", y="年化收益率(%)", color="代码", size="单张权利金($)", hover_name="代码",
+            hover_data=["到期日", "行权价($)", "综合评分", "财报预警"], 
+            title="📊 全量标的收益与风险散点图 (直观对比 ETF 与高波股)", template="plotly_dark"
         )
         st.plotly_chart(fig, use_container_width=True)
 
@@ -248,7 +255,6 @@ if 'scan_df' in st.session_state:
         c2.markdown(f"""<div class="metric-card"><div class="metric-label">💵 即刻落袋权利金 (现金流)</div><div class="metric-value" style="color:#F59E0B;">${total_premium:,.2f}</div></div>""", unsafe_allow_html=True)
         c3.markdown(f"""<div class="metric-card"><div class="metric-label">📦 包含标的数量</div><div class="metric-value" style="color:#3B82F6;">{len(selected_options)} 只标的</div></div>""", unsafe_allow_html=True)
 
-        # 独立展示选中的 Moomoo 代码，自带一键复制按钮
         if selected_options:
             st.markdown("##### 📝 已选合约 Moomoo 实盘代码 (点击右侧图标一键复制)")
             for _, row in selected_df.iterrows():
