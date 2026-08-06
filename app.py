@@ -14,9 +14,9 @@ except ImportError:
     HAS_CURL_CFFI = False
 
 # ==============================================================================
-# 1. 核心缓存引擎 (1小时内相同参数不重复请求雅虎 API，彻底防 Rate Limit)
+# 1. 核心缓存引擎 (10分钟短缓存，支持手动一键清除，防 Rate Limit 与死缓存)
 # ==============================================================================
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price, min_ann_ret, min_d, max_d, avoid_earn):
     """单只股票的安全抓取与解析函数，带缓存与详细排查日志"""
     records = []
@@ -41,13 +41,16 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
             pass
             
         if current_price is None or np.isnan(current_price) or current_price <= 0:
-            hist = ticker.history(period="1d")
-            if not hist.empty:
-                current_price = float(hist['Close'].iloc[-1])
+            try:
+                hist = ticker.history(period="1d")
+                if not hist.empty:
+                    current_price = float(hist['Close'].iloc[-1])
+            except Exception:
+                pass
 
         if not current_price or np.isnan(current_price):
             diag["HTTP状态"] = "报错/空数据"
-            diag["排查结论"] = "❌ 无法获取最新股价 (可能触发 IP 频控)"
+            diag["排查结论"] = "❌ 无法获取最新股价 (可能触发 IP 频控或代码错误)"
             return records, diag
 
         diag["HTTP状态"] = "200 (正常)"
@@ -60,14 +63,20 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
             return records, diag
 
         # 3. 提取期权到期日
-        dates = ticker.options
+        dates = ()
+        try:
+            dates = ticker.options
+        except Exception as e:
+            diag["排查结论"] = f"❌ 期权链拉取失败: {str(e)}"
+            return records, diag
+
         if not dates:
-            diag["排查结论"] = "❌ 未找到可用期权到期日"
+            diag["排查结论"] = "❌ 雅虎未返回可用期权到期日 (可能无期权或接口未响应)"
             return records, diag
             
         diag["可用到期日"] = len(dates)
 
-        # 4. 提取财报日 (避险过滤)
+        # 4. 提取财报日 (避险过滤，加异常捕获防止程序卡死)
         next_earnings_date = None
         if avoid_earn:
             try:
@@ -82,14 +91,18 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
                         if len(e_dates) > 0:
                             next_earnings_date = pd.to_datetime(e_dates[0]).date()
             except Exception:
-                pass
+                next_earnings_date = None
 
         today = datetime.date.today()
         max_strike_price = budget / 100.0
 
         # 5. 遍历到期日拉取 Put 期权链
         for d_str in dates:
-            exp_date = datetime.datetime.strptime(d_str, "%Y-%m-%d").date()
+            try:
+                exp_date = datetime.datetime.strptime(d_str, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+
             dte = (exp_date - today).days
 
             # DTE 时间窗过滤
@@ -104,8 +117,13 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
             try:
                 opt_chain = ticker.option_chain(d_str)
                 puts = opt_chain.puts
-                if puts.empty:
+                if puts is None or puts.empty:
                     continue
+
+                # 数据预处理：填充 NaN 值，避免过滤逻辑因 NaN 全部丢弃
+                puts['volume'] = puts['volume'].fillna(0)
+                puts['openInterest'] = puts['openInterest'].fillna(0)
+                puts['bid'] = puts['bid'].fillna(0.0)
 
                 valid_puts = puts[
                     (puts['strike'] <= max_strike_price) &
@@ -118,10 +136,13 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
                 for _, row in valid_puts.iterrows():
                     strike = float(row['strike'])
                     bid = float(row['bid'])
-                    ask = float(row['ask'])
-                    volume = int(row['volume']) if not pd.isna(row['volume']) else 0
-                    open_interest = int(row['openInterest']) if not pd.isna(row['openInterest']) else 0
+                    ask = float(row['ask']) if 'ask' in row and not pd.isna(row['ask']) else bid
+                    volume = int(row['volume'])
+                    open_interest = int(row['openInterest'])
                     iv = float(row['impliedVolatility']) if 'impliedVolatility' in row and not pd.isna(row['impliedVolatility']) else 0.0
+
+                    if dte <= 0:
+                        continue
 
                     # 计算年化与保证金
                     annual_return = (bid / strike) * (365.0 / dte) * 100.0
@@ -160,7 +181,7 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
         if len(records) > 0:
             diag["排查结论"] = "✅ 扫描成功"
         else:
-            diag["排查结论"] = "⚠️ 无符合当前 Bid/成交量/年化门槛的合约"
+            diag["排查结论"] = f"⚠️ 找到 {len(dates)} 个到期日，但无符合当前 Bid/成交量/年化门槛的合约"
 
     except Exception as e:
         err_msg = str(e)
@@ -191,7 +212,7 @@ st.markdown("""
 st.markdown('<div class="main-title">🚀 Sell Put 智能量化终端 4.0 (老股民实盘臻选·黄金平衡版)</div>', unsafe_allow_html=True)
 
 # ==============================================================================
-# 3. 股票池内置预设 (完整维持初心：小盘低股价练手标的池)
+# 3. 股票池内置预设
 # ==============================================================================
 PRESET_WATCHLISTS = {
     "🌱 小盘低股价练手/黄金实盘池 (默认推荐)": [
@@ -231,8 +252,8 @@ with st.sidebar:
     
     st.markdown("---")
     st.subheader("🌊 盘口与买方对手盘风控")
-    min_volume = st.number_input("最低成交量 (张)", value=1, step=1, min_value=0)
-    min_oi = st.number_input("最低持仓量 (张)", value=1, step=1, min_value=0)
+    min_volume = st.number_input("最低成交量 (张)", value=0, step=1, min_value=0, help="非交易时段建议设为0，避免因盘后无成交过滤掉有Bid报价的合约")
+    min_oi = st.number_input("最低持仓量 (张)", value=0, step=1, min_value=0)
     min_bid = st.number_input("最低买一价 (Bid $)", value=0.02, step=0.01, min_value=0.01, format="%.2f")
     min_annual_return = st.number_input("最低年化收益率 (%)", value=6.0, step=0.5, min_value=0.0)
     
@@ -241,9 +262,13 @@ with st.sidebar:
     min_dte = st.number_input("最小到期天数 (DTE)", value=1, step=1, min_value=1)
     max_dte = st.number_input("最大到期天数 (DTE)", value=60, step=5, min_value=7)
     
-    earnings_avoid = st.checkbox("开启财报避险 (隐藏跨财报期权)", value=True, help="剔除在期权到期日前即将发布财报的股票")
+    earnings_avoid = st.checkbox("开启财报避险 (隐藏跨财报期权)", value=False, help="若盘后抓取不到财报日期，可取消勾选以放行合约")
     
     st.markdown("---")
+    if st.button("🧹 清除缓存并重新扫描"):
+        st.cache_data.clear()
+        st.success("缓存已清除！")
+        
     start_btn = st.button("🚀 启动 4.0 全能量化扫描", type="primary", use_container_width=True)
 
 # ==============================================================================
@@ -291,9 +316,7 @@ if start_btn:
         diag_logs.append(diag)
         
         progress_bar.progress((idx + 1) / total_tickers)
-        
-        # 核心防封锁缓冲：每次请求间隔 0.6 秒，平摊 API 调用频次
-        time.sleep(0.6)
+        time.sleep(0.5)
         
     status_text.empty()
     progress_bar.empty()
@@ -316,7 +339,6 @@ if start_btn:
             st.metric("平均年化收益率", f"{df_res['年化收益率'].mean():.2f}%")
 
         st.success(f"🎉 扫描完成！共找到 **{len(df_res)}** 条符合风控策略的 Sell Put 合约组合。")
-        
         st.dataframe(df_display, use_container_width=True)
         
         csv_data = df_res.to_csv(index=False).encode('utf-8-sig')
@@ -330,7 +352,6 @@ if start_btn:
     else:
         st.warning("🤖 未找到符合要求的标的！请展开下方【🛠️ 接口抓取与风控排查明细】查看具体诊断原因。")
 
-    # 诊断面板：精准排查频控或过滤原因
     with st.expander("🛠️ 接口抓取与风控排查明细 (点击展开诊断面板)", expanded=True):
         df_diag = pd.DataFrame(diag_logs)
         st.dataframe(df_diag, use_container_width=True)
