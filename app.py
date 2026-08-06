@@ -24,9 +24,9 @@ max_budget = st.sidebar.number_input("单笔预算上限 ($)", value=3000, step=
 
 st.sidebar.subheader("🌊 盘口与买方流动性风控")
 min_volume = st.sidebar.number_input("最低成交量(张)", value=0, step=5, help="盘后建议设为0，盘中可设为10-20")
-min_open_interest = st.sidebar.number_input("最低持仓量(张)", value=30, step=10, help="确保合约具备基本流动性与机构关注度")
+min_open_interest = st.sidebar.number_input("最低持仓量(张)", value=0, step=5, help="如扫盘为空可设为0，盘中可设为20-50")
 min_bid_price = st.sidebar.number_input(
-    "最低买一出价 (Bid $)", value=0.03, step=0.01, help="买方必须出价至少此金额，彻底干掉Bid=0的做市商死水合约"
+    "最低买一出价 (Bid $)", value=0.02, step=0.01, help="买方必须出价至少此金额，彻底干掉Bid=0的做市商死水合约"
 )
 
 # 财报避险开关
@@ -95,7 +95,7 @@ def fetch_all_data_v4(
 
     for idx, sym in enumerate(target_pool):
         try:
-            time.sleep(0.05)
+            time.sleep(0.1)  # 增加延时规避 Yahoo 限流
 
             t = yf.Ticker(sym)
             hist = t.history(period="1d")
@@ -134,6 +134,7 @@ def fetch_all_data_v4(
                 if otm_puts.empty:
                     continue
 
+                # 填充空值防运算报错
                 otm_puts["openInterest"] = otm_puts["openInterest"].fillna(0)
                 otm_puts["volume"] = otm_puts["volume"].fillna(0)
                 otm_puts["bid"] = otm_puts["bid"].fillna(0.0)
@@ -141,84 +142,66 @@ def fetch_all_data_v4(
                 otm_puts["lastPrice"] = otm_puts["lastPrice"].fillna(0.0)
                 otm_puts["impliedVolatility"] = otm_puts["impliedVolatility"].fillna(0.0)
 
-                # ---------------- 🚨 买方出价与死水黑洞过滤 ----------------
-                # 1. 出价或成交价必须大于设定的最小门槛
+                # ---------------- 🚨 坚如磐石的防空报清洗逻辑 ----------------
+                # 1. 出价(Bid)或最新成交价(lastPrice)达到门槛即可
                 otm_puts = otm_puts[(otm_puts["bid"] >= min_bid_val) | (otm_puts["lastPrice"] >= min_bid_val)]
-
-                # 2. 严格把控买卖价差 (防止点差过大的僵尸单)
-                otm_puts["Spread"] = otm_puts["ask"] - otm_puts["bid"]
-                otm_puts = otm_puts[otm_puts["Spread"] <= np.maximum(0.15, otm_puts["bid"] * 1.0)]
-
-                # 3. 持仓量 (Open Interest) 过滤
-                if min_oi_val > 0:
-                    otm_puts = otm_puts[otm_puts["openInterest"] >= min_oi_val]
-
-                # 4. 成交量 (Volume) 过滤（兼顾盘后）
-                if min_vol_val > 0:
-                    otm_puts = otm_puts[(otm_puts["volume"] >= min_vol_val) | (otm_puts["openInterest"] >= max(min_oi_val, 50))]
-
                 if otm_puts.empty:
                     continue
 
-                # 计算推荐限价
-                otm_puts["Mid"] = (otm_puts["bid"] + otm_puts["ask"]) / 2
+                # 2. 持仓量 (Open Interest) 过滤
+                if min_oi_val > 0:
+                    otm_puts = otm_puts[otm_puts["openInterest"] >= min_oi_val]
+                    if otm_puts.empty:
+                        continue
+
+                # 3. 成交量 (Volume) 过滤
+                if min_vol_val > 0:
+                    otm_puts = otm_puts[otm_puts["volume"] >= min_vol_val]
+                    if otm_puts.empty:
+                        continue
+
+                # 4. 稳健推荐限价推算
+                otm_puts["Mid"] = np.where(
+                    (otm_puts["bid"] > 0) & (otm_puts["ask"] > 0),
+                    (otm_puts["bid"] + otm_puts["ask"]) / 2,
+                    otm_puts["lastPrice"]
+                )
                 otm_puts["推荐挂单价"] = np.where(
                     otm_puts["bid"] > 0,
                     np.minimum(otm_puts["Mid"], otm_puts["bid"] * 1.15),
                     otm_puts["lastPrice"]
                 )
-
-                otm_puts = otm_puts[otm_puts["推荐挂单价"] >= 0.01]
-
-                if otm_puts.empty:
-                    continue
+                otm_puts["推荐挂单价"] = np.maximum(otm_puts["推荐挂单价"], 0.01)
 
                 otm_puts["股票代码"] = sym
                 otm_puts["到期日"] = expiry
                 otm_puts["DTE"] = dte
                 otm_puts["股价"] = current_price
 
-                # 生成 Moomoo 专属代码
+                # 生成 Moomoo 代码
                 otm_puts["Moomoo代码"] = otm_puts.apply(
                     lambda r: generate_moomoo_search_code(r["股票代码"], r["到期日"], r["strike"]), axis=1
                 )
 
-                otm_puts["安全边际(%)"] = (
-                    (current_price - otm_puts["strike"]) / current_price
-                ) * 100
+                otm_puts["安全边际(%)"] = ((current_price - otm_puts["strike"]) / current_price) * 100
                 otm_puts = otm_puts[otm_puts["安全边际(%)"] <= 40.0]
-
                 if otm_puts.empty:
                     continue
 
-                otm_puts["年化收益率(%)"] = (
-                    (otm_puts["推荐挂单价"] / otm_puts["strike"])
-                    * (365 / dte)
-                    * 100
-                )
+                otm_puts["年化收益率(%)"] = (otm_puts["推荐挂单价"] / otm_puts["strike"]) * (365 / dte) * 100
 
                 if "delta" in otm_puts.columns and not otm_puts["delta"].isna().all():
                     otm_puts["行权概率(%)"] = otm_puts["delta"].abs() * 100
                 else:
-                    otm_puts["行权概率(%)"] = np.maximum(
-                        0.5, 50.0 - otm_puts["安全边际(%)"] * 2.2
-                    )
+                    otm_puts["行权概率(%)"] = np.maximum(0.5, 50.0 - otm_puts["安全边际(%)"] * 2.2)
 
                 otm_puts = otm_puts[otm_puts["行权概率(%)"] >= 1.0]
-
                 if otm_puts.empty:
                     continue
 
                 otm_puts["财报预警"] = earnings_label
-                otm_puts["IV状态"] = otm_puts["impliedVolatility"].apply(
-                    get_iv_rank_status
-                )
-
-                otm_puts["评估值"] = (
-                    otm_puts["年化收益率(%)"]
-                    * otm_puts["安全边际(%)"]
-                    / (otm_puts["行权概率(%)"] + 1)
-                )
+                otm_puts["IV状态"] = otm_puts["impliedVolatility"].apply(get_iv_rank_status)
+                otm_puts["评估值"] = (otm_puts["年化收益率(%)"] * otm_puts["安全边际(%)"]) / (otm_puts["行权概率(%)"] + 1)
 
                 all_opportunities.append(otm_puts)
 
@@ -255,7 +238,7 @@ if st.session_state.get("scan_error", False) and (
     "scan_results" not in st.session_state or st.session_state["scan_results"] is None
 ):
     st.warning(
-        "😭 未找到符合要求的标的，建议取消勾选【开启财报避险】或将侧边栏【最低买一出价】调为 0.02 再次尝试。"
+        "😭 未找到符合要求的标的。建议：1. 适度提高侧边栏【最高股价】；2. 取消勾选【开启财报避险】。"
     )
 
 if (
@@ -290,9 +273,7 @@ if (
 
     st.markdown("---")
     st.subheader("💰 拟合组合现金流计算器")
-    st.caption(
-        "在下方多选您看中的标的，系统将自动汇总您的资金占用与即时现金收入："
-    )
+    st.caption("在下方多选您看中的标的，系统将自动汇总您的资金占用与即时现金收入：")
 
     options_map = {}
     options_list = []
@@ -301,33 +282,20 @@ if (
         options_list.append(label)
         options_map[label] = row
 
-    selected_opts = st.multiselect(
-        "选择准备同时操作的 Sell Put 组合：", options_list
-    )
+    selected_opts = st.multiselect("选择准备同时操作的 Sell Put 组合：", options_list)
 
     if selected_opts:
-        total_margin = 0
-        total_cash = 0
-        selected_codes = []
-
-        for label in selected_opts:
-            matched = options_map[label]
-            total_margin += matched["预估保证金"]
-            total_cash += matched["推荐挂单价"] * 100
-            selected_codes.append(f"{matched['股票代码']} (${matched['strike']})")
+        total_margin = sum(options_map[l]["预估保证金"] for l in selected_opts)
+        total_cash = sum(options_map[l]["推荐挂单价"] * 100 for l in selected_opts)
 
         c1, c2, c3 = st.columns(3)
         c1.metric("🔒 选中组合需要资金 (总保证金)", f"${total_margin:,.0f}")
         c2.metric(
             "💵 即刻落袋权利金 (现金流)",
             f"${total_cash:,.2f}",
-            delta=(
-                f"整体回报率 {(total_cash / total_margin) * 100:.2f}%"
-                if total_margin > 0
-                else "0%"
-            ),
+            delta=f"整体回报率 {(total_cash / total_margin) * 100:.2f}%" if total_margin > 0 else "0%",
         )
-        c3.metric("🎯 包含标的数量", f"{len(selected_codes)} 只标的")
+        c3.metric("🎯 包含标的数量", f"{len(selected_opts)} 只标的")
 
     st.markdown("---")
 
