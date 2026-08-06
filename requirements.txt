@@ -1,6 +1,5 @@
 streamlit
-yfinance
 pandas
 numpy
 requests
-random-user-agent
+curl_cffi
