@@ -336,6 +336,8 @@ if (
         "🎯推荐限价": result_df["推荐挂单价"].map("${:.2f}".format),
         "买一价(Bid)": result_df["bid"].map("${:.2f}".format),
         "需保证金": result_df["预估保证金"].map("${:,.0f}".format),
+        "安全边际": result_df["安全边际(%)"].map("{:.2f}%".format),
+        "🚀预计年化": result_df["年化收益率(%)"].map("{:.2f}%".format),
         "成交量": result_df["volume"].astype(int),
         "持仓量": result_df["openInterest"].astype(int),
         "综合评分": result_df["评估值"].map("{:.2f}".format),
@@ -350,7 +352,7 @@ if (
     order_lines = []
     for idx, row in result_df.head(5).iterrows():
         moomoo_search_codes.append(row["Moomoo代码"])
-        order_line = f"代码: {row['Moomoo代码']} | SELL PUT 1张 | 推荐挂单价:${row['推荐挂单价']:.2f} (买一价:${row['bid']:.2f}) | 预估收取权利金:${row['推荐挂单价']*100:.0f}"
+        order_line = f"代码: {row['Moomoo代码']} | SELL PUT 1张 | 推荐挂单价:${row['推荐挂单价']:.2f} (买一价:${row['bid']:.2f}) | 预估年化:{row['年化收益率(%)']:.1f}% | 预估收入:${row['推荐挂单价']*100:.0f}"
         order_lines.append(order_line)
 
     st.markdown("#### 1️⃣ Moomoo App 纯代码列表（直接点击右上角复制，去 Moomoo 顶部搜索框粘贴）：")
