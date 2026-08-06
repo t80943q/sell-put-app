@@ -6,7 +6,15 @@ import streamlit as st
 import yfinance as yf
 
 st.set_page_config(page_title="Sell Put 4.0 机构级智能终端", layout="wide")
-st.title("🚀 Sell Put 智能量化终端 4.0 (高流动性防废单强化版)")
+st.title("🚀 Sell Put 智能量化终端 4.0 (Moomoo 搜索直达版)")
+
+
+# ---------------- 🎯 生成 Moomoo 搜索框专属期权代码 ----------------
+def generate_moomoo_search_code(symbol, expiry, strike):
+    clean_date = str(expiry).replace("-", "")[2:]  # 2026-08-07 -> 260807
+    strike_int = int(round(float(strike) * 1000))   # 12.0 -> 12000
+    return f"{symbol}{clean_date}P{strike_int}"
+
 
 # ================= 侧边栏风控设置 =================
 st.sidebar.header("⚙️ 筛选风控与策略模式")
@@ -133,14 +141,13 @@ def fetch_all_data_v4(
                 otm_puts["impliedVolatility"] = otm_puts["impliedVolatility"].fillna(0.0)
 
                 # ---------------- 🚨 极致严格的流动性清洗 ----------------
-                # 1. 强行剔除买一价出价过低的废单 (Bid < min_bid_val 绝对淘汰)
                 otm_puts = otm_puts[(otm_puts["bid"] >= min_bid_val) & (otm_puts["ask"] > 0)]
 
-                # 2. 严格控制【买卖价差 (Bid-Ask Spread)】：防止虚高或离奇无成交做市盘口
+                # 严格控制【买卖价差 (Bid-Ask Spread)】
                 otm_puts["Spread"] = otm_puts["ask"] - otm_puts["bid"]
                 otm_puts = otm_puts[otm_puts["Spread"] <= np.maximum(0.12, otm_puts["bid"] * 0.85)]
 
-                # 3. 硬性要求成交量和持仓量同时达标
+                # 硬性要求成交量和持仓量同时达标
                 otm_puts = otm_puts[
                     (otm_puts["openInterest"] >= min_oi_val)
                     & (otm_puts["volume"] >= min_vol_val)
@@ -149,7 +156,7 @@ def fetch_all_data_v4(
                 if otm_puts.empty:
                     continue
 
-                # 废除 lastPrice 兜底逻辑！只使用真实的 Bid 与 Mid 计算合理的推荐限价，保障 100% 撮合成交
+                # 基于真实 Bid/Mid 计算推荐限价
                 otm_puts["Mid"] = (otm_puts["bid"] + otm_puts["ask"]) / 2
                 otm_puts["推荐挂单价"] = np.minimum(otm_puts["Mid"], otm_puts["bid"] * 1.10)
 
@@ -162,6 +169,11 @@ def fetch_all_data_v4(
                 otm_puts["到期日"] = expiry
                 otm_puts["DTE"] = dte
                 otm_puts["股价"] = current_price
+
+                # 生成 Moomoo 专属搜素代码
+                otm_puts["Moomoo代码"] = otm_puts.apply(
+                    lambda r: generate_moomoo_search_code(r["股票代码"], r["到期日"], r["strike"]), axis=1
+                )
 
                 otm_puts["安全边际(%)"] = (
                     (current_price - otm_puts["strike"]) / current_price
@@ -251,7 +263,7 @@ if (
         y="年化收益率(%)",
         size="volume",
         color="行权概率(%)",
-        hover_name="股票代码",
+        hover_name="Moomoo代码",
         hover_data={
             "strike": ":$.2f",
             "推荐挂单价": ":$.2f",
@@ -277,7 +289,7 @@ if (
     options_map = {}
     options_list = []
     for idx, row in result_df.iterrows():
-        label = f"[{row['股票代码']}] 到期日:{row['到期日']}(还剩{row['DTE']}天) | 行权价:${row['strike']:.2f} | 保证金:${row['预估保证金']:,.0f} | 推荐权利金:${row['推荐挂单价'] * 100:.0f}"
+        label = f"[{row['Moomoo代码']}] 到期日:{row['到期日']}(还剩{row['DTE']}天) | 行权价:${row['strike']:.2f} | 保证金:${row['预估保证金']:,.0f} | 推荐权利金:${row['推荐挂单价'] * 100:.0f}"
         options_list.append(label)
         options_map[label] = row
 
@@ -294,7 +306,7 @@ if (
             matched = options_map[label]
             total_margin += matched["预估保证金"]
             total_cash += matched["推荐挂单价"] * 100
-            selected_codes.append(f"{matched['股票代码']} (${matched['strike']})")
+            selected_codes.append(f"{matched['Moomoo代码']}")
 
         c1, c2, c3 = st.columns(3)
         c1.metric("🔒 选中组合需要资金 (总保证金)", f"${total_margin:,.0f}")
@@ -313,16 +325,16 @@ if (
 
     st.subheader("📋 详细数据与实盘挂单指南")
     display_df = pd.DataFrame({
-        "代码": result_df["股票代码"],
+        "Moomoo搜索代码": result_df["Moomoo代码"],
+        "正股代码": result_df["股票代码"],
         "现价": result_df["股价"].map("${:.2f}".format),
         "IV环境": result_df["IV状态"],
         "财报预警": result_df["财报预警"],
         "到期日": result_df["到期日"],
-        "DTE (到期天数)": result_df["DTE"].map("{} 天".format),
+        "DTE": result_df["DTE"].map("{} 天".format),
         "行权价": result_df["strike"].map("${:.2f}".format),
-        "🎯推荐实盘挂单价": result_df["推荐挂单价"].map("${:.2f}".format),
+        "🎯推荐限价": result_df["推荐挂单价"].map("${:.2f}".format),
         "买一价(Bid)": result_df["bid"].map("${:.2f}".format),
-        "卖一价(Ask)": result_df["ask"].map("${:.2f}".format),
         "需保证金": result_df["预估保证金"].map("${:,.0f}".format),
         "成交量": result_df["volume"].astype(int),
         "持仓量": result_df["openInterest"].astype(int),
@@ -332,11 +344,17 @@ if (
     st.dataframe(display_df, use_container_width=True, hide_index=True)
 
     st.markdown("---")
-    st.subheader("⚡ 实盘快捷挂单指令 (支持一键复制到券商/笔记)")
+    st.subheader("⚡ Moomoo 实盘快捷搜素与挂单指令")
 
+    moomoo_search_codes = []
     order_lines = []
     for idx, row in result_df.head(5).iterrows():
-        order_line = f"SELL PUT 1张 {row['股票代码']} | 到期日:{row['到期日']} | 行权价:${row['strike']:.2f} | 买一价:${row['bid']:.2f} | 推荐限价:${row['推荐挂单价']:.2f} (预估收入:${row['推荐挂单价']*100:.0f})"
+        moomoo_search_codes.append(row["Moomoo代码"])
+        order_line = f"代码: {row['Moomoo代码']} | SELL PUT 1张 | 推荐挂单价:${row['推荐挂单价']:.2f} (买一价:${row['bid']:.2f}) | 预估收取权利金:${row['推荐挂单价']*100:.0f}"
         order_lines.append(order_line)
 
+    st.markdown("#### 1️⃣ Moomoo App 纯代码列表（直接点击右上角复制，去 Moomoo 顶部搜索框粘贴）：")
+    st.code("\n".join(moomoo_search_codes), language="text")
+
+    st.markdown("#### 2️⃣ 完整挂单参考指南：")
     st.code("\n".join(order_lines), language="text")
