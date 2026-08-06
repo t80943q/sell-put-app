@@ -3,22 +3,13 @@ import datetime
 import streamlit as st
 import pandas as pd
 import numpy as np
-import requests
 import yfinance as yf
 
-# 尝试加载 curl_cffi 进行 Chrome TLS 指纹伪装
-try:
-    from curl_cffi import requests as curl_requests
-    HAS_CURL_CFFI = True
-except ImportError:
-    HAS_CURL_CFFI = False
-
 # ==============================================================================
-# 1. 核心缓存引擎 (10分钟短缓存，支持手动一键清除，防 Rate Limit 与死缓存)
+# 1. 核心缓存引擎 (10分钟短缓存，保留全部16项核心指标)
 # ==============================================================================
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price, min_ann_ret, min_d, max_d, avoid_earn):
-    """单只股票的安全抓取与解析函数，带缓存与详细排查日志"""
     records = []
     diag = {
         "代码": symbol,
@@ -50,13 +41,13 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
 
         if not current_price or np.isnan(current_price):
             diag["HTTP状态"] = "报错/空数据"
-            diag["排查结论"] = "❌ 无法获取最新股价 (可能触发 IP 频控或代码错误)"
+            diag["排查结论"] = "❌ 无法获取最新股价"
             return records, diag
 
         diag["HTTP状态"] = "200 (正常)"
         diag["抓取现价"] = f"${current_price:.2f}"
         
-        # 2. 价格区间过滤 ($2.0 ~ 预算最高行权价 * 1.35)
+        # 2. 动态预算区间过滤
         max_allowed_price = (budget / 100.0) * 1.35
         if current_price < 2.0 or current_price > max_allowed_price:
             diag["排查结论"] = f"⚠️ 现价 (${current_price:.2f}) 超出预算允许匹配区间 ($2.0 ~ ${max_allowed_price:.1f})"
@@ -71,12 +62,12 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
             return records, diag
 
         if not dates:
-            diag["排查结论"] = "❌ 雅虎未返回可用期权到期日 (可能无期权或接口未响应)"
+            diag["排查结论"] = "❌ 雅虎未返回可用期权到期日"
             return records, diag
             
         diag["可用到期日"] = len(dates)
 
-        # 4. 提取财报日 (避险过滤，加异常捕获防止程序卡死)
+        # 4. 财报日提取 (财报避险诉求)
         next_earnings_date = None
         if avoid_earn:
             try:
@@ -105,14 +96,17 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
 
             dte = (exp_date - today).days
 
-            # DTE 时间窗过滤
+            # DTE 时间窗过滤 (长周期/短周期由侧边栏决定)
             if not (min_d <= dte <= max_d):
                 continue
 
             # 财报避险过滤
-            if avoid_earn and next_earnings_date:
+            is_cross_earnings = False
+            if next_earnings_date:
                 if today < next_earnings_date <= exp_date:
-                    continue
+                    is_cross_earnings = True
+                    if avoid_earn:
+                        continue
 
             try:
                 opt_chain = ticker.option_chain(d_str)
@@ -120,10 +114,11 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
                 if puts is None or puts.empty:
                     continue
 
-                # 数据预处理：填充 NaN 值，避免过滤逻辑因 NaN 全部丢弃
+                # 数据清洗与防空值处理
                 puts['volume'] = puts['volume'].fillna(0)
                 puts['openInterest'] = puts['openInterest'].fillna(0)
                 puts['bid'] = puts['bid'].fillna(0.0)
+                puts['ask'] = puts['ask'].fillna(0.0)
 
                 valid_puts = puts[
                     (puts['strike'] <= max_strike_price) &
@@ -136,15 +131,17 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
                 for _, row in valid_puts.iterrows():
                     strike = float(row['strike'])
                     bid = float(row['bid'])
-                    ask = float(row['ask']) if 'ask' in row and not pd.isna(row['ask']) else bid
+                    ask = float(row['ask']) if row['ask'] > 0 else bid
+                    spread = round(ask - bid, 2)
                     volume = int(row['volume'])
                     open_interest = int(row['openInterest'])
                     iv = float(row['impliedVolatility']) if 'impliedVolatility' in row and not pd.isna(row['impliedVolatility']) else 0.0
+                    delta = float(row['delta']) if 'delta' in row and not pd.isna(row['delta']) else 0.0
 
                     if dte <= 0:
                         continue
 
-                    # 计算年化与保证金
+                    # 16 项关键核心诉求计算：
                     annual_return = (bid / strike) * (365.0 / dte) * 100.0
                     if annual_return < min_ann_ret:
                         continue
@@ -153,27 +150,31 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
                     premium_collected = bid * 100.0
                     safety_buffer = ((current_price - strike) / current_price) * 100.0
 
+                    # 导出完整的 16 项字段
                     records.append({
                         "代码": symbol,
                         "标的现价 ($)": round(current_price, 2),
                         "到期日": d_str,
                         "DTE (天)": dte,
                         "行权价 ($)": strike,
-                        "安全边际": f"{safety_buffer:.1f}%",
-                        "买一价 (Bid $)": bid,
-                        "卖一价 (Ask $)": ask,
-                        "单张权利金 ($)": round(premium_collected, 2),
+                        "安全边际 (%)": round(safety_buffer, 2),
+                        "买一价 Bid ($)": bid,
+                        "卖一价 Ask ($)": ask,
+                        "买卖价差 ($)": spread,
+                        "权利金/单张 ($)": round(premium_collected, 2),
                         "保证金/单笔 ($)": round(margin_required, 2),
-                        "年化收益率": round(annual_return, 2),
-                        "隐含波动率 (IV)": f"{iv * 100:.1f}%",
+                        "年化收益率 (%)": round(annual_return, 2),
+                        "隐含波动率 IV (%)": f"{iv * 100:.1f}%",
+                        "Delta": round(delta, 3) if delta != 0 else "N/A",
                         "成交量 (张)": volume,
-                        "持仓量 (张)": open_interest
+                        "持仓量 (张)": open_interest,
+                        "跨财报风险": "⚠️ 跨财报" if is_cross_earnings else "✅ 安全"
                     })
 
             except Exception as opt_err:
                 err_str = str(opt_err)
-                if "Rate limited" in err_str or "429" in err_str or "401" in err_str:
-                    diag["排查结论"] = "⚠️ 触发雅虎频控 (Rate Limited)，部分日期跳过"
+                if "Rate limited" in err_str or "429" in err_str:
+                    diag["排查结论"] = "⚠️ 触发雅虎频控 (Rate Limited)"
                     break
                 continue
 
@@ -181,39 +182,20 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
         if len(records) > 0:
             diag["排查结论"] = "✅ 扫描成功"
         else:
-            diag["排查结论"] = f"⚠️ 找到 {len(dates)} 个到期日，但无符合当前 Bid/成交量/年化门槛的合约"
+            diag["排查结论"] = f"⚠️ 找到 {len(dates)} 个到期日，无符合设定的合约"
 
     except Exception as e:
-        err_msg = str(e)
-        if "Rate limited" in err_msg or "429" in err_msg:
-            diag["排查结论"] = "❌ 触发雅虎 API 频率限制 (Rate Limited)"
-        else:
-            diag["排查结论"] = f"❌ 运行异常: {err_msg}"
+        diag["排查结论"] = f"❌ 运行异常: {str(e)}"
 
     return records, diag
 
 # ==============================================================================
-# 2. 页面全局配置与 UI 样式设定
+# 2. 页面配置与 UI 渲染
 # ==============================================================================
-st.set_page_config(
-    page_title="Sell Put 智能量化终端 4.0",
-    page_icon="🚀",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="Sell Put 智能量化终端 4.0", page_icon="🚀", layout="wide")
 
-st.markdown("""
-<style>
-    .main-title { font-size: 2.0rem; font-weight: 700; color: #1E293B; margin-bottom: 0.5rem; }
-    .stDataFrame { border-radius: 8px; overflow: hidden; }
-</style>
-""", unsafe_allow_html=True)
+st.markdown('<h2 style="color:#1E293B;">🚀 Sell Put 智能量化终端 4.0 (16项核心诉求臻选版)</h2>', unsafe_allow_html=True)
 
-st.markdown('<div class="main-title">🚀 Sell Put 智能量化终端 4.0 (老股民实盘臻选·黄金平衡版)</div>', unsafe_allow_html=True)
-
-# ==============================================================================
-# 3. 股票池内置预设
-# ==============================================================================
 PRESET_WATCHLISTS = {
     "🌱 小盘低股价练手/黄金实盘池 (默认推荐)": [
         'RIOT', 'CLSK', 'F', 'LCID', 'MARA', 'SOFI', 'PLTR', 'HOOD', 'NIO', 'XPEV', 
@@ -225,136 +207,78 @@ PRESET_WATCHLISTS = {
     ],
     "科技巨头 & 大盘蓝筹 (Mega Tech & Blue Chips)": [
         'AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA', 'AMD', 'INTC', 'QCOM'
-    ],
-    "中概股 & 价值回升 (China Concept)": [
-        'BABA', 'PDD', 'BIDU', 'JD', 'NIO', 'XPEV', 'LI', 'FUTU', 'TME', 'EDU'
     ]
 }
 
-# ==============================================================================
-# 4. 侧边栏交互 (风控与策略参数)
-# ==============================================================================
 with st.sidebar:
-    st.header("⚙️ 筛选风控与策略模式")
-    
+    st.header("⚙️ 16项策略风控面板")
     selected_pool_name = st.selectbox("📋 股票池预设选择", list(PRESET_WATCHLISTS.keys()), index=0)
-    custom_tickers_input = st.text_area("✍️ 补充自定义代码 (用逗号或空格分隔)", value="", placeholder="例如: AMD, INTC, BAC")
+    custom_tickers_input = st.text_area("✍️ 补充自定义代码", value="")
     
     st.markdown("---")
-    st.subheader("💰 资金与预算配置")
-    budget = st.number_input("💵 单笔预算上限 ($)", value=3500, step=500, min_value=500)
-    
-    max_strike = budget / 100.0
-    st.info(f"""🎯 **预算 ${budget:,} 对应风控区间：**
-
-* **最大行权价上限:** ${max_strike:.2f}
-* **动态匹配股价区间:** $2.0 ~ ${max_strike * 1.35:.1f}""")
+    budget = st.number_input("💵 单笔预算上限 ($)", value=3500, step=500)
     
     st.markdown("---")
-    st.subheader("🌊 盘口与买方对手盘风控")
-    min_volume = st.number_input("最低成交量 (张)", value=0, step=1, min_value=0, help="非交易时段建议设为0，避免因盘后无成交过滤掉有Bid报价的合约")
-    min_oi = st.number_input("最低持仓量 (张)", value=0, step=1, min_value=0)
-    min_bid = st.number_input("最低买一价 (Bid $)", value=0.02, step=0.01, min_value=0.01, format="%.2f")
-    min_annual_return = st.number_input("最低年化收益率 (%)", value=6.0, step=0.5, min_value=0.0)
+    st.subheader("🌊 盘口风控")
+    min_volume = st.number_input("最低成交量 (张)", value=0, min_value=0)
+    min_oi = st.number_input("最低持仓量 (张)", value=0, min_value=0)
+    min_bid = st.number_input("最低买一价 (Bid $)", value=0.02, step=0.01, format="%.2f")
+    min_annual_return = st.number_input("最低年化收益率 (%)", value=6.0, step=0.5)
     
     st.markdown("---")
-    st.subheader("📅 到期日与财报风控")
-    min_dte = st.number_input("最小到期天数 (DTE)", value=1, step=1, min_value=1)
-    max_dte = st.number_input("最大到期天数 (DTE)", value=60, step=5, min_value=7)
-    
-    earnings_avoid = st.checkbox("开启财报避险 (隐藏跨财报期权)", value=False, help="若盘后抓取不到财报日期，可取消勾选以放行合约")
+    st.subheader("📅 周期长短调控")
+    min_dte = st.number_input("最小到期天数 (DTE)", value=1, min_value=1)
+    max_dte = st.number_input("最大到期天数 (DTE)", value=60, min_value=7, help="调大此值可抓取更长周期、利润更大的远期期权")
+    earnings_avoid = st.checkbox("开启财报避险", value=False)
     
     st.markdown("---")
-    if st.button("🧹 清除缓存并重新扫描"):
+    if st.button("🧹 清除缓存"):
         st.cache_data.clear()
-        st.success("缓存已清除！")
+        st.success("缓存已清空！")
         
     start_btn = st.button("🚀 启动 4.0 全能量化扫描", type="primary", use_container_width=True)
 
-# ==============================================================================
-# 5. 合并股票池逻辑
-# ==============================================================================
 def get_combined_watchlist():
     base_list = PRESET_WATCHLISTS[selected_pool_name]
     if custom_tickers_input.strip():
         add_list = [x.strip().upper() for x in custom_tickers_input.replace(',', ' ').split() if x.strip()]
-        combined = list(dict.fromkeys(base_list + add_list))
-    else:
-        combined = base_list
-    return combined
+        return list(dict.fromkeys(base_list + add_list))
+    return base_list
 
-# ==============================================================================
-# 6. 主逻辑渲染与诊断结果面板
-# ==============================================================================
 if start_btn:
     watchlist = get_combined_watchlist()
     total_tickers = len(watchlist)
-    
-    st.write(f"🔍 正在对 **{total_tickers}** 只标的进行缓冲防封扫描与诊断分析...")
-    
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    all_results = []
-    diag_logs = []
+    all_results, diag_logs = [], []
     
     for idx, sym in enumerate(watchlist):
         status_text.text(f"正在扫描 [{idx+1}/{total_tickers}]: {sym} ...")
-        
         res, diag = fetch_ticker_options_safe(
-            symbol=sym,
-            budget=budget,
-            min_vol=min_volume,
-            min_open_int=min_oi,
-            min_b_price=min_bid,
-            min_ann_ret=min_annual_return,
-            min_d=min_dte,
-            max_d=max_dte,
-            avoid_earn=earnings_avoid
+            symbol=sym, budget=budget, min_vol=min_volume, min_open_int=min_oi,
+            min_b_price=min_bid, min_ann_ret=min_annual_return,
+            min_d=min_dte, max_d=max_dte, avoid_earn=earnings_avoid
         )
         all_results.extend(res)
         diag_logs.append(diag)
-        
         progress_bar.progress((idx + 1) / total_tickers)
-        time.sleep(0.5)
+        time.sleep(0.4)
         
     status_text.empty()
     progress_bar.empty()
 
     if all_results:
         df_res = pd.DataFrame(all_results)
-        df_res = df_res.sort_values(by="年化收益率", ascending=False).reset_index(drop=True)
+        df_res = df_res.sort_values(by="年化收益率 (%)", ascending=False).reset_index(drop=True)
         
-        df_display = df_res.copy()
-        df_display["年化收益率"] = df_display["年化收益率"].apply(lambda x: f"{x:.2f}%")
-        
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            st.metric("符合条件标的数", len(df_res["代码"].unique()))
-        with c2:
-            st.metric("精选 Put 策略总数", len(df_res))
-        with c3:
-            st.metric("最高年化收益率", f"{df_res['年化收益率'].max():.2f}%")
-        with c4:
-            st.metric("平均年化收益率", f"{df_res['年化收益率'].mean():.2f}%")
-
-        st.success(f"🎉 扫描完成！共找到 **{len(df_res)}** 条符合风控策略的 Sell Put 合约组合。")
-        st.dataframe(df_display, use_container_width=True)
+        st.success(f"🎉 扫描完成！共获得 **{len(df_res)}** 条符合 16 项核心条件的策略组合。")
+        st.dataframe(df_res, use_container_width=True)
         
         csv_data = df_res.to_csv(index=False).encode('utf-8-sig')
-        st.download_button(
-            label="📥 导出筛选结果为 CSV 文件",
-            data=csv_data,
-            file_name=f"Sell_Put_Scan_{datetime.date.today()}.csv",
-            mime="text/csv",
-            type="secondary"
-        )
+        st.download_button("📥 导出 16 项完整字段 CSV", data=csv_data, file_name=f"Sell_Put_16_Metrics_{datetime.date.today()}.csv", mime="text/csv")
     else:
-        st.warning("🤖 未找到符合要求的标的！请展开下方【🛠️ 接口抓取与风控排查明细】查看具体诊断原因。")
+        st.warning("🤖 未找到符合要求的标的，请展开诊断面板查看。")
 
-    with st.expander("🛠️ 接口抓取与风控排查明细 (点击展开诊断面板)", expanded=True):
-        df_diag = pd.DataFrame(diag_logs)
-        st.dataframe(df_diag, use_container_width=True)
-
-else:
-    st.info("👈 请在侧边栏配置筛选风控参数，然后点击 **【🚀 启动 4.0 全能量化扫描】** 开始运行。")
+    with st.expander("🛠️ 接口抓取与诊断明细", expanded=True):
+        st.dataframe(pd.DataFrame(diag_logs), use_container_width=True)
