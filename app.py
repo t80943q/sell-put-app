@@ -15,7 +15,6 @@ def get_bypass_session():
     """生成具备动态 Header 伪装能力的 requests Session 以绕过 Yahoo Finance 限制"""
     session = requests.Session()
     
-    # 随机生成真实的现代浏览器 User-Agent (Chrome / Edge on Windows / Mac)
     software_names = [SoftwareName.CHROME.value, SoftwareName.EDGE.value]
     operating_systems = [OperatingSystem.WINDOWS.value, OperatingSystem.MAC.value]
     user_agent_rotator = UserAgent(software_names=software_names, operating_systems=operating_systems, limit=100)
@@ -50,7 +49,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# 自定义 css 样式调整
 st.markdown("""
 <style>
     .main-title {
@@ -87,7 +85,7 @@ PRESET_WATCHLISTS = {
     "核心臻选优质标的池 (默认推荐)": [
         'AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA', 'AMD', 'INTC', 'PLTR',
         'QCOM', 'NFLX', 'BABA', 'PDD', 'DIS', 'BA', 'COIN', 'MARA', 'NIO', 'XPEV',
-        'AMD', 'UBER', 'ABNB', 'SQ', 'PYPL', 'SHOP', 'HOOD', 'SOFI', 'SMCI', 'ARM'
+        'UBER', 'ABNB', 'SQ', 'PYPL', 'SHOP', 'HOOD', 'SOFI', 'SMCI', 'ARM'
     ],
     "科技巨头 & 高流动性 (Mega Tech)": [
         'AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA', 'AVGO', 'COST', 'ORCL'
@@ -115,12 +113,10 @@ with st.sidebar:
     budget = st.number_input("💵 单笔预算上限 ($)", value=5000, step=500, min_value=500)
     
     max_strike = budget / 100.0
-    st.info(f"🎯 **预算 ${budget:,} 对应风控区间：**
+    st.info(f"""🎯 **预算 ${budget:,} 对应风控区间：**
 
-"
-            f"* **最大行权价上限:** ${max_strike:.2f}
-"
-            f"* **动态匹配股价区间:** $2.0 ~ ${max_strike * 1.35:.1f}")
+* **最大行权价上限:** ${max_strike:.2f}
+* **动态匹配股价区间:** $2.0 ~ ${max_strike * 1.35:.1f}""")
     
     st.markdown("---")
     st.subheader("🌊 盘口与买方对手盘风控")
@@ -140,13 +136,13 @@ with st.sidebar:
     start_btn = st.button("🚀 启动 4.0 全能量化扫描", type="primary", use_container_width=True)
 
 # ==============================================================================
-# 5. 数据抓取与解析引擎 (支持伪装 Header 与错误容忍)
+# 5. 数据抓取与解析引擎
 # ==============================================================================
 def get_combined_watchlist():
     base_list = PRESET_WATCHLISTS[selected_pool_name]
     if custom_tickers_input.strip():
         add_list = [x.strip().upper() for x in custom_tickers_input.replace(',', ' ').split() if x.strip()]
-        combined = list(dict.fromkeys(base_list + add_list)) # 去重且保持顺序
+        combined = list(dict.fromkeys(base_list + add_list))
     else:
         combined = base_list
     return combined
@@ -172,32 +168,25 @@ def analyze_ticker_options(symbol, budget, min_vol, min_open_int, min_b_price, m
     """单只股票的深度 Sell Put 筛选算法"""
     records = []
     try:
-        # 使用伪装 Session 实例化 yfinance Ticker，防封锁
         ticker = yf.Ticker(symbol, session=bypass_session)
         
-        # 获取当前现价
         fast_info = ticker.fast_info
         current_price = getattr(fast_info, 'last_price', None)
         if current_price is None or np.isnan(current_price) or current_price <= 0:
-            # 备用方案：通过 history 兜底获取最新价
             hist = ticker.history(period="2d")
             if not hist.empty:
                 current_price = float(hist['Close'].iloc[-1])
             else:
-
                 return records
 
-        # 股价区间筛选 (现价不能高于预算可承受上限的 1.35 倍，且不低于 2.0 美元)
         max_allowed_price = (budget / 100.0) * 1.35
         if current_price < 2.0 or current_price > max_allowed_price:
             return records
 
-        # 获取期权链到期日列表
         dates = ticker.options
         if not dates:
             return records
 
-        # 获取财报日
         next_earnings_date = None
         if avoid_earn:
             next_earnings_date = fetch_earnings_date(ticker)
@@ -208,16 +197,13 @@ def analyze_ticker_options(symbol, budget, min_vol, min_open_int, min_b_price, m
             exp_date = datetime.datetime.strptime(d_str, "%Y-%m-%d").date()
             dte = (exp_date - today).days
 
-            # DTE 时间窗过滤
             if dte < min_d or dte > max_d:
                 continue
 
-            # 财报避险过滤
             if avoid_earn and next_earnings_date:
                 if today < next_earnings_date <= exp_date:
-                    continue # 跨财报期，避险跳过
+                    continue
 
-            # 抓取 Put 期权链
             try:
                 opt_chain = ticker.option_chain(d_str)
                 puts = opt_chain.puts
@@ -226,13 +212,11 @@ def analyze_ticker_options(symbol, budget, min_vol, min_open_int, min_b_price, m
             except Exception:
                 continue
 
-            # 行权价上限约束 (绝对不能超过 预算/100)
             max_strike_price = budget / 100.0
             
-            # 筛选符合条件的行权价与流动性指标
             valid_puts = puts[
                 (puts['strike'] <= max_strike_price) &
-                (puts['strike'] < current_price) &  # 仅 Sell OTM Put (虚值期权)
+                (puts['strike'] < current_price) &
                 (puts['bid'] >= min_b_price) &
                 (puts['volume'] >= min_vol) &
                 (puts['openInterest'] >= min_open_int)
@@ -242,19 +226,13 @@ def analyze_ticker_options(symbol, budget, min_vol, min_open_int, min_b_price, m
                 strike = float(row['strike'])
                 bid = float(row['bid'])
                 ask = float(row['ask'])
-                mid = round((bid + ask) / 2.0, 2)
                 volume = int(row['volume']) if not pd.isna(row['volume']) else 0
                 open_interest = int(row['openInterest']) if not pd.isna(row['openInterest']) else 0
                 iv = float(row['impliedVolatility']) if 'impliedVolatility' in row and not pd.isna(row['impliedVolatility']) else 0.0
 
-                # 资金与收益计算
-                margin_required = strike * 100.0  # 单张合约所需现金担保 ($)
-                premium_collected = bid * 100.0   # 按 Bid 单张收取的权利金 ($)
-                
-                # 年化收益率计算公式： (Bid / Strike) * (365 / DTE) * 100
+                margin_required = strike * 100.0
+                premium_collected = bid * 100.0
                 annual_return = (bid / strike) * (365.0 / dte) * 100.0
-                
-                # 安全边际 (行权价距离现价的折价百分比)
                 safety_buffer = ((current_price - strike) / current_price) * 100.0
 
                 if annual_return < min_ann_ret:
@@ -283,7 +261,7 @@ def analyze_ticker_options(symbol, budget, min_vol, min_open_int, min_b_price, m
     return records
 
 # ==============================================================================
-# 6. 主逻辑渲染与表格/导出展示
+# 6. 主逻辑渲染与展示
 # ==============================================================================
 if start_btn:
     watchlist = get_combined_watchlist()
@@ -317,15 +295,11 @@ if start_btn:
 
     if all_results:
         df_res = pd.DataFrame(all_results)
-        
-        # 按年化收益率降序排列
         df_res = df_res.sort_values(by="年化收益率", ascending=False).reset_index(drop=True)
         
-        # 格式化展示年化收益率
         df_display = df_res.copy()
         df_display["年化收益率"] = df_display["年化收益率"].apply(lambda x: f"{x:.2f}%")
         
-        # 顶部 KPI 指标看板
         c1, c2, c3, c4 = st.columns(4)
         with c1:
             st.metric("符合条件标的数", len(df_res["代码"].unique()))
@@ -340,7 +314,6 @@ if start_btn:
 
         st.success(f"🎉 扫描完成！共找到 **{len(df_res)}** 条符合风控策略的 Sell Put 合约组合。")
         
-        # 主表格展示
         st.dataframe(
             df_display,
             use_container_width=True,
@@ -350,7 +323,6 @@ if start_btn:
             }
         )
         
-        # 下载 CSV 导出功能
         csv_data = df_res.to_csv(index=False).encode('utf-8-sig')
         st.download_button(
             label="📥 导出筛选结果为 CSV 文件",
@@ -361,19 +333,13 @@ if start_btn:
         )
     else:
         st.warning(
-            f"🤖 未找到符合要求的标的！
+            """🤖 未找到符合要求的标的！
 
-"
-            f"💡 **建议调整参数再次尝试：**
-"
-            f"1. 适当调大侧边栏 **【单笔预算上限】**（例如调至 $5,000 ~ $10,000）
-"
-            f"2. 降低 **【最低成交量】** 或 **【最低持仓量】**（例如调至 1 ~ 5）
-"
-            f"3. 调低 **【最低年化收益率】**（例如调至 8% ~ 10%）
-"
-            f"4. 切换顶部 **【股票池预设】** 或在自定义框中输入更多高波动性标的（如 PLTR, COIN, TSLA）。"
+💡 **建议调整参数再次尝试：**
+1. 适当调大侧边栏 **【单笔预算上限】**（例如调至 $5,000 ~ $10,000）
+2. 降低 **【最低成交量】** 或 **【最低持仓量】**（例如调至 1 ~ 5）
+3. 调低 **【最低年化收益率】**（例如调至 8% ~ 10%）
+4. 切换顶部 **【股票池预设】** 或在自定义框中输入更多高波动性标的（如 PLTR, COIN, TSLA）。"""
         )
 else:
-    # 默认提示界面
     st.info("👈 请在侧边栏配置筛选风控参数，然后点击 **【🚀 启动 4.0 全能量化扫描】** 开始运行。")
