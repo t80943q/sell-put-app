@@ -18,13 +18,14 @@ st.markdown("""
     .metric-card { background-color: #1E293B; padding: 15px; border-radius: 8px; text-align: center; border: 1px solid #334155; }
     .metric-value { font-size: 1.8rem; font-weight: bold; color: #10B981; }
     .metric-label { font-size: 1rem; color: #94A3B8; }
+    .rec-box { background-color: #0F172A; padding: 20px; border-radius: 10px; border-left: 5px solid #3B82F6; margin-bottom: 20px;}
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="main-title">🏦 Sell Put 4.0 机构级智能终端 (现金流与实盘融合版)</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🏦 Sell Put 4.0 机构级智能终端 (资金智能分配版)</div>', unsafe_allow_html=True)
 
 # ==============================================================================
-# 2. 核心数据引擎
+# 2. 核心数据引擎 (16项指标)
 # ==============================================================================
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price, min_ann_ret, min_d, max_d, avoid_earn):
@@ -35,8 +36,7 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
         ticker = yf.Ticker(symbol)
         
         current_price = None
-        try:
-            current_price = getattr(ticker.fast_info, 'last_price', None)
+        try: current_price = getattr(ticker.fast_info, 'last_price', None)
         except: pass
         if not current_price or np.isnan(current_price) or current_price <= 0:
             try:
@@ -155,13 +155,12 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
     return records, diag
 
 # ==============================================================================
-# 3. 侧边栏风控与策略模式 (整合全量股票池)
+# 3. 侧边栏风控与策略模式
 # ==============================================================================
 list_growth = ['RIOT', 'CLSK', 'F', 'LCID', 'MARA', 'SOFI', 'PLTR', 'HOOD', 'NIO', 'XPEV', 'AFRM', 'UPST', 'IONQ', 'RBLX', 'DKNG', 'PATH', 'SOUN', 'AAL', 'BAC', 'INTC']
 list_high_iv = ['COIN', 'SMCI', 'ARM', 'U', 'MSTR', 'CVNA', 'SNOW', 'AI', 'ROKU']
 list_etf = ['TQQQ', 'SOXL', 'IWM', 'QQQ', 'SPY', 'ARKK', 'KWEB', 'XLE', 'XLF', 'SMH', 'TLT', 'GDX']
 list_mega = ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA', 'AMD', 'QCOM']
-# 自动去重并合并成全量矩阵
 all_tickers_combined = list(dict.fromkeys(list_growth + list_high_iv + list_etf + list_mega))
 
 PRESET_WATCHLISTS = {
@@ -173,12 +172,17 @@ PRESET_WATCHLISTS = {
 }
 
 with st.sidebar:
-    st.header("⚙️ 筛选风控与策略模式")
+    st.header("⚙️ 资金配置与策略筛选")
+    
+    # --- 新增：账户总资金 ---
+    account_capital = st.number_input("🏦 账户可用总资金 ($)", value=3400, step=100, help="系统将根据此资金量，自动计算并推荐最适合的实盘合约组合。")
+    
+    st.markdown("---")
     selected_pool = st.selectbox("📋 股票池选择", list(PRESET_WATCHLISTS.keys()), index=0)
     custom_tickers = st.text_area("✍️ 自定义代码 (空格/逗号分隔)", value="")
     
     st.markdown("---")
-    budget = st.number_input("💵 单笔预算上限 ($)", value=100000, step=5000)
+    budget = st.number_input("💵 单笔持仓预算上限 ($)", value=3400, step=500, help="单只股票愿意承受的最大接盘资金")
     min_volume = st.number_input("最低成交量 (张)", value=0, step=1)
     min_oi = st.number_input("最低持仓量 (张)", value=0, step=10)
     min_bid = st.number_input("最低买一价 (Bid $)", value=0.01, step=0.01) 
@@ -190,7 +194,7 @@ with st.sidebar:
     avoid_earn = st.checkbox("开启财报避险 (隐藏跨财报期权)", value=False)
     
     if avoid_earn and max_dte > 80:
-        st.warning("⚠️ **策略冲突预警**：美股约90天发一次财报，设最大天数为180天时若开启此项，远期合约将因跨财报日被全部过滤！做长周期建议取消勾选。")
+        st.warning("⚠️ **预警**：做长周期(>90天)时若开启财报避险，远期合约将被全部过滤！建议取消勾选。")
     
     st.markdown("---")
     if st.button("🧹 清理系统缓存"): 
@@ -217,7 +221,7 @@ if start_btn:
     all_res, diag_logs = [], []
     
     for idx, sym in enumerate(watchlist):
-        status_text.text(f"正在分析全量数据 [{idx+1}/{len(watchlist)}]: {sym} ...")
+        status_text.text(f"正在分析标的 [{idx+1}/{len(watchlist)}]: {sym} ...")
         res, diag = fetch_ticker_options_safe(sym, budget, min_volume, min_oi, min_bid, min_annual_return, min_dte, max_dte, avoid_earn)
         all_res.extend(res)
         diag_logs.append(diag)
@@ -233,6 +237,54 @@ if 'scan_df' in st.session_state:
     df = st.session_state['scan_df']
     
     if not df.empty:
+        # --- 1. AI 智能仓位推荐系统 (根据账户总资金) ---
+        st.markdown('<div class="sub-title">🤖 AI 智能仓位推荐 (基于可用总资金)</div>', unsafe_allow_html=True)
+        
+        rec_list = []
+        rem_cap = account_capital
+        seen_tickers = set()
+        
+        # 贪心算法：从高分榜首向下遍历，寻找能塞进预算的合约组合（同一标的只选一次以分散风险）
+        for _, row in df.iterrows():
+            margin = row["需保证金($)"]
+            sym = row["代码"]
+            if margin <= rem_cap and sym not in seen_tickers:
+                rec_list.append(row)
+                rem_cap -= margin
+                seen_tickers.add(sym)
+                
+        if rec_list:
+            rec_df = pd.DataFrame(rec_list)
+            used_margin = rec_df["需保证金($)"].sum()
+            total_prem = rec_df["单张权利金($)"].sum()
+            avg_ann = rec_df["年化收益率(%)"].mean()
+            
+            st.markdown(f"""
+            <div class="rec-box">
+                <h4 style='color: white; margin-top:0;'>根据您填写的 <b>${account_capital:,.2f}</b> 可用资金，系统为您匹配了以下最优组合：</h4>
+                <p style='color: #94A3B8; font-size: 1.1rem;'>
+                    ✔️ <b>预估占用资金：</b> <span style='color:#10B981;'>${used_margin:,.2f}</span> &nbsp;&nbsp;|&nbsp;&nbsp; 
+                    💰 <b>预计落袋权利金：</b> <span style='color:#F59E0B;'>${total_prem:,.2f}</span> &nbsp;&nbsp;|&nbsp;&nbsp; 
+                    📈 <b>组合平均年化：</b> <span style='color:#3B82F6;'>{avg_ann:.1f}%</span>
+                </p>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # 显示 AI 推荐的实盘代码与指令
+            for _, row in rec_df.iterrows():
+                st.markdown(f"**🎯 {row['代码']}** (到期: {row['到期日']} | 行权价: ${row['行权价($)']})")
+                c_m, c_i = st.columns(2)
+                with c_m:
+                    st.caption("📝 Moomoo / 富途 实盘代码")
+                    st.code(row["Moomoo 代码"], language="text")
+                with c_i:
+                    st.caption("📝 交易挂单指令")
+                    st.code(row["实盘挂单指令"], language="text")
+        else:
+            st.info(f"🤖 当前总资金 (${account_capital}) 不足以匹配任何高分合约。建议调高资金，或筛选价格更低的标的。")
+
+        # --- 2. 图表区 ---
+        st.markdown("---")
         fig = px.scatter(
             df, x="安全边际(%)", y="年化收益率(%)", color="代码", size="单张权利金($)", hover_name="代码",
             hover_data=["到期日", "行权价($)", "综合评分", "财报预警"], 
@@ -240,8 +292,9 @@ if 'scan_df' in st.session_state:
         )
         st.plotly_chart(fig, use_container_width=True)
 
-        st.markdown('<div class="sub-title">💰 拟合组合现金流计算器</div>', unsafe_allow_html=True)
-        st.write("选择准备同时操作的 Sell Put 组合:")
+        # --- 3. 手动现金流计算器区 ---
+        st.markdown('<div class="sub-title">💰 手动拟合现金流计算器</div>', unsafe_allow_html=True)
+        st.write("自选准备同时操作的 Sell Put 组合:")
         selected_options = st.multiselect(" ", df["Unique_ID"].tolist(), label_visibility="collapsed")
         
         total_margin, total_premium = 0.0, 0.0
@@ -255,24 +308,29 @@ if 'scan_df' in st.session_state:
         c2.markdown(f"""<div class="metric-card"><div class="metric-label">💵 即刻落袋权利金 (现金流)</div><div class="metric-value" style="color:#F59E0B;">${total_premium:,.2f}</div></div>""", unsafe_allow_html=True)
         c3.markdown(f"""<div class="metric-card"><div class="metric-label">📦 包含标的数量</div><div class="metric-value" style="color:#3B82F6;">{len(selected_options)} 只标的</div></div>""", unsafe_allow_html=True)
 
+        # 独立展示自选的 Moomoo 代码及指令
         if selected_options:
-            st.markdown("##### 📝 已选合约 Moomoo 实盘代码 (点击右侧图标一键复制)")
+            st.markdown("##### 📝 自选组合实盘挂单详情 (点击右侧图标一键复制)")
             for _, row in selected_df.iterrows():
-                st.code(row["Moomoo 代码"], language="text")
+                st.markdown(f"**{row['代码']}** (到期: {row['到期日']} | 行权价: ${row['行权价($)']})")
+                c_m2, c_i2 = st.columns(2)
+                with c_m2: st.code(row["Moomoo 代码"], language="text")
+                with c_i2: st.code(row["实盘挂单指令"], language="text")
 
-        st.markdown('<div class="sub-title">📋 详细数据与实盘挂单指南 (16项核心指标)</div>', unsafe_allow_html=True)
+        # --- 4. 详细数据表格 ---
+        st.markdown('<div class="sub-title">📋 详细数据底表 (16项核心指标)</div>', unsafe_allow_html=True)
         
         df_display = df.rename(columns={"标的现价": "现价($)"}).drop(columns=["Unique_ID"])
         st.dataframe(df_display, use_container_width=True, height=600)
         
         csv = df_display.to_csv(index=False).encode('utf-8-sig')
-        st.download_button("📥 导出实盘数据为 CSV", data=csv, file_name=f"SellPut_Terminal_{datetime.date.today()}.csv", mime="text/csv")
+        st.download_button("📥 导出全量实盘数据为 CSV", data=csv, file_name=f"SellPut_Terminal_{datetime.date.today()}.csv", mime="text/csv")
         
     else:
         st.warning("🤖 未扫描到符合条件的合约，请尝试调低年化收益率或放宽到期日限制。")
 
     if 'diag_logs' in st.session_state:
-        with st.expander("🛠️ 系统底层接口抓取与诊断日志", expanded=False):
+        with st.expander("🛠️ 系统底层接口抓取与诊断日志 (点击展开)", expanded=False):
             st.dataframe(st.session_state['diag_logs'], use_container_width=True)
 else:
-    st.info("👈 请在左侧配置参数，点击【🚀 启动 4.0 全能量化扫盘】。")
+    st.info("👈 请在左侧配置资金与策略参数，点击【🚀 启动 4.0 全能量化扫盘】。")
