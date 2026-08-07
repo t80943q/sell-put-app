@@ -9,7 +9,7 @@ import plotly.express as px
 # ==============================================================================
 # 1. 页面配置与全局样式
 # ==============================================================================
-st.set_page_config(page_title="期权轮子中枢 5.0 (主理人精简版)", page_icon="🏦", layout="wide")
+st.set_page_config(page_title="期权轮子中枢 5.0 (机构主理人精简版)", page_icon="🏦", layout="wide")
 
 st.markdown("""
 <style>
@@ -129,6 +129,7 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
                 for _, row in valid_opts.iterrows():
                     strike, bid = float(row['strike']), float(row['bid'])
                     iv = float(row['impliedVolatility']) if not pd.isna(row.get('impliedVolatility')) else 0.0
+                    delta = float(row['delta']) if 'delta' in row and not pd.isna(row['delta']) else np.nan
 
                     if dte <= 0: continue
                     
@@ -144,7 +145,7 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
                     else:
                         safety_margin = ((strike - current_price) / current_price) * 100.0
 
-                    # 综合评分逻辑优化：年化占 70% 权重，安全边际占 30% 权重（末日期权 Gamma 惩罚保留）
+                    # 综合评分：年化占 70%，安全边际占 30%（末日期权 Gamma 惩罚保留）
                     base_score = (annual_return * 0.7) + (safety_margin * 0.3)
                     score = round(base_score * 0.5 if dte < 7 else base_score, 2)
 
@@ -165,6 +166,7 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
                         "行权价($)": strike,
                         "需资金($)": round(margin, 2),
                         "安全边际(%)": round(safety_margin, 2),
+                        "Delta": round(delta, 2) if not pd.isna(delta) else np.nan,
                         "挂单Bid($)": bid,
                         "单张入账($)": premium,
                         "年化收益(%)": round(annual_return, 2),
@@ -293,7 +295,8 @@ if 'scan_df' in st.session_state:
             """, unsafe_allow_html=True)
             
             for _, row in rec_df.iterrows():
-                st.markdown(f"**🎯 {row['代码']}**  <small style='color:gray;'>[{row['所属板块']}]</small> | DTE: **{row['DTE(天)']}天**", unsafe_allow_html=True)
+                delta_str = f" | Delta: **{row['Delta']}**" if not pd.isna(row['Delta']) else ""
+                st.markdown(f"**🎯 {row['代码']}**  <small style='color:gray;'>[{row['所属板块']}]</small> | DTE: **{row['DTE(天)']}天**{delta_str}", unsafe_allow_html=True)
                 c_m, c_i = st.columns(2)
                 with c_m: st.code(row["Moomoo 代码"], language="text")
                 with c_i: st.code(row["实盘指令"], language="text")
@@ -304,7 +307,7 @@ if 'scan_df' in st.session_state:
         st.markdown("---")
         fig = px.scatter(
             df, x="安全边际(%)", y="年化收益(%)", color="所属板块", size="单张入账($)", hover_name="代码",
-            hover_data=["到期日", "行权价($)"], 
+            hover_data=["到期日", "行权价($)", "Delta"], 
             title="📊 标的收益与风险分布散点图", template="plotly_dark"
         )
         st.plotly_chart(fig, use_container_width=True)
@@ -337,7 +340,6 @@ if 'scan_df' in st.session_state:
         
         df_display = df.drop(columns=["Unique_ID"])
         
-        # 优化列配置格式（带上符号，隐藏索引）
         st.dataframe(
             df_display, 
             hide_index=True, 
@@ -351,6 +353,7 @@ if 'scan_df' in st.session_state:
                 "需资金($)": st.column_config.NumberColumn(format="$%d"),
                 "年化收益(%)": st.column_config.NumberColumn(format="%.2f%%"),
                 "安全边际(%)": st.column_config.NumberColumn(format="%.2f%%"),
+                "Delta": st.column_config.NumberColumn(format="%.2f"),
             }
         )
         
