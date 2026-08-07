@@ -39,7 +39,7 @@ def get_sector(sym):
         if sym in syms: return sec
     return 'Other (其他)'
 
-# --- 原生算法：标准正态分布累积分布函数 $\Phi(x)$ ---
+# --- 原生算法：标准正态分布累积分布函数 ---
 def norm_cdf(x):
     return (1.0 + math.erf(x / math.sqrt(2.0))) / 2.0
 
@@ -172,6 +172,15 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
                     base_score = (annual_return * 0.7) + (safety_margin * 0.3)
                     score = round(base_score * 0.5 if dte < 7 else base_score, 2)
 
+                    # 标记黄金 Delta 区间 (0.15 - 0.25)
+                    delta_num = round(delta, 2) if not pd.isna(delta) else np.nan
+                    if not pd.isna(delta_num) and 0.15 <= delta_num <= 0.25:
+                        delta_display = f"🎯 {delta_num:.2f}"
+                    elif not pd.isna(delta_num):
+                        delta_display = f"{delta_num:.2f}"
+                    else:
+                        delta_display = "N/A"
+
                     yymmdd = exp_date.strftime("%y%m%d")
                     type_char = 'P' if strategy == "Sell Put" else 'C'
                     moomoo_code = f"US.{symbol}{yymmdd}{type_char}{int(round(strike * 1000)):08d}"
@@ -189,7 +198,7 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
                         "行权价($)": strike,
                         "需资金($)": round(margin, 2),
                         "安全边际(%)": round(safety_margin, 2),
-                        "Delta": round(delta, 2) if not pd.isna(delta) else np.nan,
+                        "Delta": delta_display,
                         "挂单Bid($)": bid,
                         "单张入账($)": premium,
                         "年化收益(%)": round(annual_return, 2),
@@ -318,7 +327,7 @@ if 'scan_df' in st.session_state:
             """, unsafe_allow_html=True)
             
             for _, row in rec_df.iterrows():
-                delta_str = f" | Delta: **{row['Delta']}**" if not pd.isna(row['Delta']) else ""
+                delta_str = f" | Delta: **{row['Delta']}**" if row['Delta'] != "N/A" else ""
                 st.markdown(f"**🎯 {row['代码']}**  <small style='color:gray;'>[{row['所属板块']}]</small> | DTE: **{row['DTE(天)']}天**{delta_str}", unsafe_allow_html=True)
                 c_m, c_i = st.columns(2)
                 with c_m: st.code(row["Moomoo 代码"], language="text")
@@ -359,7 +368,7 @@ if 'scan_df' in st.session_state:
                 with c_i2: st.code(row["实盘指令"], language="text")
 
         # --- 4. 详细数据表 ---
-        st.markdown('<div class="sub-title">📋 详细数据底表</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sub-title">📋 详细数据底表 (🎯 表示 Delta 处于 0.15-0.25 黄金胜率区间)</div>', unsafe_allow_html=True)
         
         df_display = df.drop(columns=["Unique_ID"])
         
@@ -376,7 +385,6 @@ if 'scan_df' in st.session_state:
                 "需资金($)": st.column_config.NumberColumn(format="$%d"),
                 "年化收益(%)": st.column_config.NumberColumn(format="%.2f%%"),
                 "安全边际(%)": st.column_config.NumberColumn(format="%.2f%%"),
-                "Delta": st.column_config.NumberColumn(format="%.2f"),
             }
         )
         
