@@ -138,12 +138,14 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
                     annual_return = (premium / margin) * (365.0 / dte) * 100.0
                     if annual_return < min_ann_ret: continue
 
+                    # 安全边际 (%)
                     if strategy == "Sell Put":
-                        exec_prob = ((current_price - strike) / current_price) * 100.0
+                        safety_margin = ((current_price - strike) / current_price) * 100.0
                     else:
-                        exec_prob = ((strike - current_price) / current_price) * 100.0
+                        safety_margin = ((strike - current_price) / current_price) * 100.0
 
-                    base_score = annual_return + exec_prob + 5.0
+                    # 综合评分逻辑优化：年化占 70% 权重，安全边际占 30% 权重（末日期权 Gamma 惩罚保留）
+                    base_score = (annual_return * 0.7) + (safety_margin * 0.3)
                     score = round(base_score * 0.5 if dte < 7 else base_score, 2)
 
                     yymmdd = exp_date.strftime("%y%m%d")
@@ -162,7 +164,7 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
                         "DTE(天)": dte,
                         "行权价($)": strike,
                         "需资金($)": round(margin, 2),
-                        "成交概率(%)": round(exec_prob, 2),
+                        "安全边际(%)": round(safety_margin, 2),
                         "挂单Bid($)": bid,
                         "单张入账($)": premium,
                         "年化收益(%)": round(annual_return, 2),
@@ -301,7 +303,7 @@ if 'scan_df' in st.session_state:
         # --- 2. 交互式散点图 ---
         st.markdown("---")
         fig = px.scatter(
-            df, x="成交概率(%)", y="年化收益(%)", color="所属板块", size="单张入账($)", hover_name="代码",
+            df, x="安全边际(%)", y="年化收益(%)", color="所属板块", size="单张入账($)", hover_name="代码",
             hover_data=["到期日", "行权价($)"], 
             title="📊 标的收益与风险分布散点图", template="plotly_dark"
         )
@@ -334,7 +336,23 @@ if 'scan_df' in st.session_state:
         st.markdown('<div class="sub-title">📋 详细数据底表</div>', unsafe_allow_html=True)
         
         df_display = df.drop(columns=["Unique_ID"])
-        st.dataframe(df_display, hide_index=True, use_container_width=True, height=600)
+        
+        # 优化列配置格式（带上符号，隐藏索引）
+        st.dataframe(
+            df_display, 
+            hide_index=True, 
+            use_container_width=True, 
+            height=600,
+            column_config={
+                "现价($)": st.column_config.NumberColumn(format="$%.2f"),
+                "行权价($)": st.column_config.NumberColumn(format="$%.2f"),
+                "挂单Bid($)": st.column_config.NumberColumn(format="$%.2f"),
+                "单张入账($)": st.column_config.NumberColumn(format="$%.2f"),
+                "需资金($)": st.column_config.NumberColumn(format="$%d"),
+                "年化收益(%)": st.column_config.NumberColumn(format="%.2f%%"),
+                "安全边际(%)": st.column_config.NumberColumn(format="%.2f%%"),
+            }
+        )
         
         csv = df_display.to_csv(index=False).encode('utf-8-sig')
         st.download_button("📥 导出实盘数据 CSV", data=csv, file_name=f"Wheel_Strategy_V5_{datetime.date.today()}.csv", mime="text/csv")
