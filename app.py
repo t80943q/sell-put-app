@@ -5,6 +5,7 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import plotly.express as px
+import scipy.stats as si
 
 # ==============================================================================
 # 1. 页面配置与全局样式
@@ -37,6 +38,25 @@ def get_sector(sym):
     for sec, syms in SECTOR_MAP.items():
         if sym in syms: return sec
     return 'Other (其他)'
+
+# --- Black-Scholes 期权模型反算 Delta ---
+def calculate_bs_delta(S, K, dte, iv, option_type="P", r=0.045):
+    """
+    S: 当前股价, K: 行权价, dte: 到期天数, iv: 隐波 (0.5=50%), option_type: 'P' or 'C', r: 无风险利率
+    """
+    if dte <= 0 or iv <= 0 or S <= 0 or K <= 0:
+        return np.nan
+    try:
+        T = dte / 365.0
+        d1 = (np.log(S / K) + (r + 0.5 * iv**2) * T) / (iv * np.sqrt(T))
+        if option_type == "P":
+            # Put Delta (取绝对值表示概率)
+            return abs(si.norm.cdf(d1) - 1.0)
+        else:
+            # Call Delta
+            return si.norm.cdf(d1)
+    except:
+        return np.nan
 
 # ==============================================================================
 # 2. 核心数据引擎
@@ -129,10 +149,17 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
                 for _, row in valid_opts.iterrows():
                     strike, bid = float(row['strike']), float(row['bid'])
                     iv = float(row['impliedVolatility']) if not pd.isna(row.get('impliedVolatility')) else 0.0
-                    delta = float(row['delta']) if 'delta' in row and not pd.isna(row['delta']) else np.nan
 
                     if dte <= 0: continue
                     
+                    # 优先读取数据源 Delta，如为 NaN 则使用 Black-Scholes 模型自动计算
+                    raw_delta = float(row['delta']) if 'delta' in row and not pd.isna(row['delta']) else np.nan
+                    if np.isnan(raw_delta) or raw_delta == 0:
+                        opt_type = "P" if strategy == "Sell Put" else "C"
+                        delta = calculate_bs_delta(current_price, strike, dte, iv, option_type=opt_type)
+                    else:
+                        delta = abs(raw_delta)
+
                     margin = strike * 100.0 if strategy == "Sell Put" else current_price * 100.0
                     premium = bid * 100.0
                     
@@ -145,7 +172,7 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
                     else:
                         safety_margin = ((strike - current_price) / current_price) * 100.0
 
-                    # 综合评分：年化占 70%，安全边际占 30%（末日期权 Gamma 惩罚保留）
+                    # 综合评分：年化 70%，安全边际 30%
                     base_score = (annual_return * 0.7) + (safety_margin * 0.3)
                     score = round(base_score * 0.5 if dte < 7 else base_score, 2)
 
