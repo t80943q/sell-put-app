@@ -9,7 +9,7 @@ import plotly.express as px
 # ==============================================================================
 # 1. 页面配置与全局样式
 # ==============================================================================
-st.set_page_config(page_title="期权轮子中枢 5.0 (主理人版)", page_icon="🏦", layout="wide")
+st.set_page_config(page_title="期权轮子中枢 5.0 (主理人精简版)", page_icon="🏦", layout="wide")
 
 st.markdown("""
 <style>
@@ -24,7 +24,7 @@ st.markdown("""
 
 st.markdown('<div class="main-title">🏦 Wheel Strategy 5.0 期权轮子中枢 (机构主理人版)</div>', unsafe_allow_html=True)
 
-# --- 板块映射字典 (用于 AI 风险分散) ---
+# --- 板块映射字典 ---
 SECTOR_MAP = {
     'Crypto (加密概念)': ['RIOT', 'CLSK', 'MARA', 'COIN', 'MSTR'],
     'EV (新能源车)': ['TSLA', 'LCID', 'NIO', 'XPEV', 'F'],
@@ -32,13 +32,14 @@ SECTOR_MAP = {
     'Growth (高波动成长)': ['SOFI', 'HOOD', 'AFRM', 'UPST', 'RBLX', 'DKNG', 'PATH', 'SOUN', 'CVNA', 'SNOW', 'AI', 'ROKU', 'PLTR', 'SMCI', 'ARM'],
     'ETF (稳健宽基)': ['TQQQ', 'SOXL', 'IWM', 'QQQ', 'SPY', 'ARKK', 'KWEB', 'XLE', 'XLF', 'SMH', 'TLT', 'GDX']
 }
+
 def get_sector(sym):
     for sec, syms in SECTOR_MAP.items():
         if sym in syms: return sec
     return 'Other (其他)'
 
 # ==============================================================================
-# 2. 核心数据引擎 (5.0 升级: 引入 CC 模式、POP 胜率、50% 止盈、Gamma 惩罚)
+# 2. 核心数据引擎
 # ==============================================================================
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price, min_ann_ret, min_d, max_d, avoid_earn, strategy="Sell Put"):
@@ -63,7 +64,6 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
 
         diag.update({"HTTP状态": "200 (正常)", "抓取现价": f"${current_price:.2f}"})
         
-        # 预算逻辑：Sell Put 是准备接盘所需的资金；CC 是假设你持仓的价值
         max_allowed_price = (budget / 100.0) * 1.50
         if current_price > max_allowed_price:
             diag["排查结论"] = f"⚠️ 现价 (${current_price:.2f}) 太高，超出当前资金配置上限"
@@ -109,7 +109,6 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
 
             try:
                 opt_chain = ticker.option_chain(d_str)
-                # 策略分流
                 options_data = opt_chain.puts if strategy == "Sell Put" else opt_chain.calls
                 if options_data is None or options_data.empty: continue
 
@@ -118,46 +117,33 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
                 df_opts['openInterest'] = df_opts['openInterest'].fillna(0)
                 df_opts['bid'] = df_opts['bid'].fillna(0.0)
                 
-                # OTM 虚值过滤
                 if strategy == "Sell Put":
                     valid_opts = df_opts[(df_opts['strike'] <= max_strike) & (df_opts['strike'] < current_price) & 
                                       (df_opts['bid'] >= min_b_price) & (df_opts['volume'] >= min_vol) & 
                                       (df_opts['openInterest'] >= min_open_int)]
-                else: # Covered Call
+                else: 
                     valid_opts = df_opts[(df_opts['strike'] > current_price) & 
                                       (df_opts['bid'] >= min_b_price) & (df_opts['volume'] >= min_vol) & 
                                       (df_opts['openInterest'] >= min_open_int)]
 
                 for _, row in valid_opts.iterrows():
                     strike, bid = float(row['strike']), float(row['bid'])
-                    ask = float(row['ask']) if not pd.isna(row.get('ask')) and row['ask'] > 0 else bid
                     iv = float(row['impliedVolatility']) if not pd.isna(row.get('impliedVolatility')) else 0.0
-                    delta = float(row['delta']) if not pd.isna(row.get('delta')) else 0.0
 
                     if dte <= 0: continue
                     
-                    # 占用的资金 (Put是行权价*100，Call是现价*100代表持仓市值)
                     margin = strike * 100.0 if strategy == "Sell Put" else current_price * 100.0
                     premium = bid * 100.0
                     
-                    # 静态年化
                     annual_return = (premium / margin) * (365.0 / dte) * 100.0
                     if annual_return < min_ann_ret: continue
 
-                    # 安全边际 (缓冲空间)
                     if strategy == "Sell Put":
-                        safety_buf = ((current_price - strike) / current_price) * 100.0
+                        exec_prob = ((current_price - strike) / current_price) * 100.0
                     else:
-                        safety_buf = ((strike - current_price) / current_price) * 100.0
+                        exec_prob = ((strike - current_price) / current_price) * 100.0
 
-                    # 胜率估算 POP (基于 Delta)
-                    pop = (100.0 - abs(delta * 100.0)) if delta != 0 else np.nan
-
-                    # 50% 止盈目标价
-                    target_tp = bid * 0.5
-
-                    # 综合评分 (惩罚末日期权 Gamma 风险)
-                    base_score = annual_return + safety_buf + (pop * 0.1 if not pd.isna(pop) else 5.0)
+                    base_score = annual_return + exec_prob + 5.0
                     score = round(base_score * 0.5 if dte < 7 else base_score, 2)
 
                     yymmdd = exp_date.strftime("%y%m%d")
@@ -176,14 +162,11 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
                         "DTE(天)": dte,
                         "行权价($)": strike,
                         "需资金($)": round(margin, 2),
-                        "安全边际(%)": round(safety_buf, 2),
-                        "胜率(POP)": f"{pop:.1f}%" if not pd.isna(pop) else "N/A",
+                        "成交概率(%)": round(exec_prob, 2),
                         "挂单Bid($)": bid,
                         "单张入账($)": premium,
-                        "50%止盈价": f"${target_tp:.2f}",
                         "年化收益(%)": round(annual_return, 2),
                         "IV环境": f"{iv*100:.1f}%",
-                        "Delta": round(delta, 3) if delta != 0 else "N/A",
                         "成交量": int(row['volume']),
                         "持仓量": int(row['openInterest']),
                         "跨财报": "⚠️ 是" if is_cross_earnings else "✅ 否",
@@ -208,7 +191,6 @@ PRESET_WATCHLISTS.update(SECTOR_MAP)
 with st.sidebar:
     st.header("⚙️ 轮子闭环与策略风控")
     
-    # 5.0 新增：策略切换
     trade_strategy = st.radio("🔄 选择操作模式", ["Sell Put (赚现金流/准备接盘)", "Covered Call (已有持仓/抛售赚息)"])
     strategy_val = "Sell Put" if "Put" in trade_strategy else "Covered Call"
     
@@ -275,17 +257,16 @@ if 'scan_df' in st.session_state:
     current_strat = st.session_state.get('cur_strategy', 'Sell Put')
     
     if not df.empty:
-        # --- 1. AI 智能仓位推荐系统 (5.0 板块隔离强化版) ---
+        # --- 1. AI 智能仓位推荐系统 ---
         st.markdown(f'<div class="sub-title">🤖 机构级 AI 智能仓位分配 (当前策略: {current_strat})</div>', unsafe_allow_html=True)
         
         rec_list = []
         rem_cap = account_capital
-        seen_sectors = set() # 核心：用于记录已选中的板块
+        seen_sectors = set()
         
         for _, row in df.iterrows():
             margin = row["需资金($)"]
             sec = row["所属板块"]
-            # 条件：资金够用，且该板块还没有被挑过，达到强分散效果
             if margin <= rem_cap and sec not in seen_sectors:
                 rec_list.append(row)
                 rem_cap -= margin
@@ -310,7 +291,7 @@ if 'scan_df' in st.session_state:
             """, unsafe_allow_html=True)
             
             for _, row in rec_df.iterrows():
-                st.markdown(f"**🎯 {row['代码']}**  <small style='color:gray;'>[{row['所属板块']}]</small> | 胜率: **{row['胜率(POP)']}** | DTE: **{row['DTE(天)']}天** | 建议在 **{row['50%止盈价']}** 挂单止盈买回", unsafe_allow_html=True)
+                st.markdown(f"**🎯 {row['代码']}**  <small style='color:gray;'>[{row['所属板块']}]</small> | DTE: **{row['DTE(天)']}天**", unsafe_allow_html=True)
                 c_m, c_i = st.columns(2)
                 with c_m: st.code(row["Moomoo 代码"], language="text")
                 with c_i: st.code(row["实盘指令"], language="text")
@@ -320,9 +301,9 @@ if 'scan_df' in st.session_state:
         # --- 2. 交互式散点图 ---
         st.markdown("---")
         fig = px.scatter(
-            df, x="安全边际(%)", y="年化收益(%)", color="所属板块", size="单张入账($)", hover_name="代码",
-            hover_data=["到期日", "行权价($)", "胜率(POP)"], 
-            title="📊 标的收益与风险分布散点图 (寻找性价比孤岛)", template="plotly_dark"
+            df, x="成交概率(%)", y="年化收益(%)", color="所属板块", size="单张入账($)", hover_name="代码",
+            hover_data=["到期日", "行权价($)"], 
+            title="📊 标的收益与风险分布散点图", template="plotly_dark"
         )
         st.plotly_chart(fig, use_container_width=True)
 
@@ -344,16 +325,16 @@ if 'scan_df' in st.session_state:
         if selected_options:
             st.markdown("##### 📝 自选组合实盘挂单详情")
             for _, row in selected_df.iterrows():
-                st.markdown(f"**{row['代码']}** (胜率 POP: {row['胜率(POP)']} | 建议止盈价: {row['50%止盈价']})")
+                st.markdown(f"**{row['代码']}** (DTE: {row['DTE(天)']}天 | 行权价: ${row['行权价($)']})")
                 c_m2, c_i2 = st.columns(2)
                 with c_m2: st.code(row["Moomoo 代码"], language="text")
                 with c_i2: st.code(row["实盘指令"], language="text")
 
         # --- 4. 详细数据表 ---
-        st.markdown(f'<div class="sub-title">📋 详细数据底表 (已集成 50%止盈 与 POP胜率)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sub-title">📋 详细数据底表</div>', unsafe_allow_html=True)
         
         df_display = df.drop(columns=["Unique_ID"])
-        st.dataframe(df_display, use_container_width=True, height=600)
+        st.dataframe(df_display, hide_index=True, use_container_width=True, height=600)
         
         csv = df_display.to_csv(index=False).encode('utf-8-sig')
         st.download_button("📥 导出实盘数据 CSV", data=csv, file_name=f"Wheel_Strategy_V5_{datetime.date.today()}.csv", mime="text/csv")
@@ -363,6 +344,6 @@ if 'scan_df' in st.session_state:
 
     if 'diag_logs' in st.session_state:
         with st.expander("🛠️ 系统抓取日志与底层诊断 (点击展开)"):
-            st.dataframe(st.session_state['diag_logs'], use_container_width=True)
+            st.dataframe(st.session_state['diag_logs'], hide_index=True, use_container_width=True)
 else:
     st.info("👈 请配置资金，点击【🚀 启动全能扫盘】。")
