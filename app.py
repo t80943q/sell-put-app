@@ -169,12 +169,12 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
                     else:
                         safety_margin = ((strike - current_price) / current_price) * 100.0
 
-                    base_score = (annual_return * 0.7) + (safety_margin * 0.3)
-                    score = round(base_score * 0.5 if dte < 7 else base_score, 2)
-
-                    # 标记黄金 Delta 区间 (0.15 - 0.25)
                     delta_num = round(delta, 2) if not pd.isna(delta) else np.nan
-                    if not pd.isna(delta_num) and 0.15 <= delta_num <= 0.25:
+                    
+                    # 判别是否在 0.15 - 0.25 黄金胜率区间
+                    is_gold_delta = 1 if (not pd.isna(delta_num) and 0.15 <= delta_num <= 0.25) else 0
+
+                    if is_gold_delta == 1:
                         delta_display = f"🎯 {delta_num:.2f}"
                     elif not pd.isna(delta_num):
                         delta_display = f"{delta_num:.2f}"
@@ -191,7 +191,7 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
                         "Unique_ID": unique_id,
                         "代码": symbol,
                         "所属板块": get_sector(symbol),
-                        "综合评分": score,
+                        "Is_Gold": is_gold_delta, # 黄金 Delta 标志位 (1 为是, 0 为否)
                         "现价($)": current_price,
                         "到期日": d_str,
                         "DTE(天)": dte,
@@ -284,7 +284,15 @@ if start_btn:
         
     status_text.empty()
     progress_bar.empty()
-    st.session_state['scan_df'] = pd.DataFrame(all_res).sort_values(by="综合评分", ascending=False).reset_index(drop=True) if all_res else pd.DataFrame()
+    
+    if all_res:
+        raw_df = pd.DataFrame(all_res)
+        # 核心改进：复合排序 (黄金 Delta 优先置顶 1 -> 0，黄金区内部按年化收益率从高到低降序排序)
+        sorted_df = raw_df.sort_values(by=["Is_Gold", "年化收益(%)"], ascending=[False, False]).reset_index(drop=True)
+        st.session_state['scan_df'] = sorted_df
+    else:
+        st.session_state['scan_df'] = pd.DataFrame()
+
     st.session_state['diag_logs'] = pd.DataFrame(diag_logs)
     st.session_state['cur_strategy'] = strategy_val
 
@@ -322,7 +330,7 @@ if 'scan_df' in st.session_state:
                     💰 <b>预计落袋现金：</b> <span style='color:#F59E0B;'>${total_prem:,.2f}</span> &nbsp;&nbsp;|&nbsp;&nbsp; 
                     📈 <b>组合平均年化：</b> <span style='color:#3B82F6;'>{avg_ann:.1f}%</span>
                 </p>
-                <small style='color: gray;'><i>* 已启动板块相关性隔离，有效规避同涨同跌的系统性 Gamma 风险。</i></small>
+                <small style='color: gray;'><i>* 已优先遴选 🎯 黄金 Delta (0.15-0.25) 及高年化标的，并完成跨板块风险隔离。</i></small>
             </div>
             """, unsafe_allow_html=True)
             
@@ -368,9 +376,10 @@ if 'scan_df' in st.session_state:
                 with c_i2: st.code(row["实盘指令"], language="text")
 
         # --- 4. 详细数据表 ---
-        st.markdown('<div class="sub-title">📋 详细数据底表 (🎯 表示 Delta 处于 0.15-0.25 黄金胜率区间)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sub-title">📋 详细数据底表 (🎯 黄金 Delta 0.15-0.25 优先置顶，内部按高年化降序)</div>', unsafe_allow_html=True)
         
-        df_display = df.drop(columns=["Unique_ID"])
+        # 移除辅助排序的逻辑列 Is_Gold 和 Unique_ID
+        df_display = df.drop(columns=["Unique_ID", "Is_Gold"])
         
         st.dataframe(
             df_display, 
