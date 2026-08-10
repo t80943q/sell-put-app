@@ -147,6 +147,12 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
 
                 for _, row in valid_opts.iterrows():
                     strike, bid = float(row['strike']), float(row['bid'])
+                    
+                    # 💡 核心修复：自动过滤除息调整等非标期权 (仅保留以 $0.50 / $0.10 为整倍数的标准行权价)
+                    strike_cents = round(strike * 100)
+                    if not (strike_cents % 50 == 0 or strike_cents % 10 == 0):
+                        continue
+
                     iv = float(row['impliedVolatility']) if not pd.isna(row.get('impliedVolatility')) else 0.0
 
                     if dte <= 0: continue
@@ -191,7 +197,7 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
                         "Unique_ID": unique_id,
                         "代码": symbol,
                         "所属板块": get_sector(symbol),
-                        "Is_Gold": is_gold_delta, # 黄金 Delta 标志位 (1 为是, 0 为否)
+                        "Is_Gold": is_gold_delta,
                         "现价($)": current_price,
                         "到期日": d_str,
                         "DTE(天)": dte,
@@ -287,7 +293,6 @@ if start_btn:
     
     if all_res:
         raw_df = pd.DataFrame(all_res)
-        # 核心改进：复合排序 (黄金 Delta 优先置顶 1 -> 0，黄金区内部按年化收益率从高到低降序排序)
         sorted_df = raw_df.sort_values(by=["Is_Gold", "年化收益(%)"], ascending=[False, False]).reset_index(drop=True)
         st.session_state['scan_df'] = sorted_df
     else:
@@ -330,7 +335,7 @@ if 'scan_df' in st.session_state:
                     💰 <b>预计落袋现金：</b> <span style='color:#F59E0B;'>${total_prem:,.2f}</span> &nbsp;&nbsp;|&nbsp;&nbsp; 
                     📈 <b>组合平均年化：</b> <span style='color:#3B82F6;'>{avg_ann:.1f}%</span>
                 </p>
-                <small style='color: gray;'><i>* 已优先遴选 🎯 黄金 Delta (0.15-0.25) 及高年化标的，并完成跨板块风险隔离。</i></small>
+                <small style='color: gray;'><i>* 已优先遴选 🎯 黄金 Delta (0.15-0.25) 及高年化标准合约。</i></small>
             </div>
             """, unsafe_allow_html=True)
             
@@ -376,9 +381,8 @@ if 'scan_df' in st.session_state:
                 with c_i2: st.code(row["实盘指令"], language="text")
 
         # --- 4. 详细数据表 ---
-        st.markdown('<div class="sub-title">📋 详细数据底表 (🎯 黄金 Delta 0.15-0.25 优先置顶，内部按高年化降序)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sub-title">📋 详细数据底表 (已过滤非标除息合约 | 🎯 黄金 Delta 优先置顶)</div>', unsafe_allow_html=True)
         
-        # 移除辅助排序的逻辑列 Is_Gold 和 Unique_ID
         df_display = df.drop(columns=["Unique_ID", "Is_Gold"])
         
         st.dataframe(
