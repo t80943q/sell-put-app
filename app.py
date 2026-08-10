@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import plotly.express as px
+import requests
 
 # ==============================================================================
 # 1. 页面配置与全局样式
@@ -58,7 +59,7 @@ def calculate_bs_delta(S, K, dte, iv, option_type="P", r=0.045):
         return np.nan
 
 # ==============================================================================
-# 2. 核心数据引擎
+# 2. 核心数据引擎 (含网络伪装与抗封锁重试)
 # ==============================================================================
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price, min_ann_ret, min_d, max_d, avoid_earn, strategy="Sell Put"):
@@ -66,7 +67,13 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
     diag = {"代码": symbol, "HTTP状态": "未请求", "抓取现价": "N/A", "可用到期日": 0, "符合条件合约数": 0, "排查结论": "未完成"}
     
     try:
-        ticker = yf.Ticker(symbol)
+        # 创建伪装 Request Session
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+        })
+        
+        ticker = yf.Ticker(symbol, session=session)
         
         current_price = None
         try: current_price = getattr(ticker.fast_info, 'last_price', None)
@@ -88,14 +95,19 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
             diag["排查结论"] = f"⚠️ 现价 (${current_price:.2f}) 太高，超出当前资金配置上限"
             return records, diag
 
-        try: dates = ticker.options
-        except Exception as e:
-            diag["排查结论"] = f"❌ 期权链拉取失败"
-            return records, diag
+        # 💡 重试机制：最多尝试 3 次拉取期权到期日
+        dates = []
+        for attempt in range(3):
+            try:
+                dates = ticker.options
+                if dates: break
+            except:
+                time.sleep(0.5)
 
         if not dates:
-            diag["排查结论"] = "❌ 无可用期权到期日"
+            diag["排查结论"] = "❌ 期权链拉取失败 (雅虎接口限流，请稍后重试)"
             return records, diag
+            
         diag["可用到期日"] = len(dates)
 
         next_earnings_date = None
@@ -127,7 +139,16 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
                 if avoid_earn: continue
 
             try:
-                opt_chain = ticker.option_chain(d_str)
+                # 💡 重试机制：拉取单日期权链
+                opt_chain = None
+                for _ in range(2):
+                    try:
+                        opt_chain = ticker.option_chain(d_str)
+                        if opt_chain is not None: break
+                    except:
+                        time.sleep(0.3)
+
+                if opt_chain is None: continue
                 options_data = opt_chain.puts if strategy == "Sell Put" else opt_chain.calls
                 if options_data is None or options_data.empty: continue
 
@@ -148,7 +169,7 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
                 for _, row in valid_opts.iterrows():
                     strike, bid = float(row['strike']), float(row['bid'])
                     
-                    # 💡 核心修复：自动过滤除息调整等非标期权 (仅保留以 $0.50 / $0.10 为整倍数的标准行权价)
+                    # 过滤除息调整非标合约
                     strike_cents = round(strike * 100)
                     if not (strike_cents % 50 == 0 or strike_cents % 10 == 0):
                         continue
@@ -177,7 +198,7 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
 
                     delta_num = round(delta, 2) if not pd.isna(delta) else np.nan
                     
-                    # 判别是否在 0.15 - 0.25 黄金胜率区间
+                    # 判别黄金 Delta (0.15 - 0.25)
                     is_gold_delta = 1 if (not pd.isna(delta_num) and 0.15 <= delta_num <= 0.25) else 0
 
                     if is_gold_delta == 1:
@@ -286,7 +307,7 @@ if start_btn:
         all_res.extend(res)
         diag_logs.append(diag)
         progress_bar.progress((idx + 1) / len(watchlist))
-        time.sleep(0.3)
+        time.sleep(0.5) # 适当微调请求间隔，防止触发频率风控
         
     status_text.empty()
     progress_bar.empty()
