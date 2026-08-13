@@ -26,12 +26,12 @@ st.markdown("""
 
 st.markdown('<div class="main-title">🏦 Wheel Strategy 5.0 期权轮子中枢 (机构主理人版)</div>', unsafe_allow_html=True)
 
-# --- 板块映射字典 ---
+# --- 板块映射字典 (已新增 MSTX, NVDL, TSLL 高隐波杠杆标的) ---
 SECTOR_MAP = {
-    'Crypto (加密概念)': ['RIOT', 'CLSK', 'MARA', 'COIN', 'MSTR'],
+    'Crypto (加密概念)': ['RIOT', 'CLSK', 'MARA', 'COIN', 'MSTR', 'MSTX'],
     'EV (新能源车)': ['TSLA', 'LCID', 'NIO', 'XPEV', 'F'],
     'Mega Tech (科技巨头)': ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'AMD', 'QCOM', 'INTC'],
-    'Growth (高波动成长)': ['SOFI', 'HOOD', 'AFRM', 'UPST', 'RBLX', 'DKNG', 'PATH', 'SOUN', 'CVNA', 'SNOW', 'AI', 'ROKU', 'PLTR', 'SMCI', 'ARM'],
+    'Growth (高波动成长)': ['SOFI', 'HOOD', 'AFRM', 'UPST', 'RBLX', 'DKNG', 'PATH', 'SOUN', 'SNXX', 'CVNA', 'SNOW', 'AI', 'ROKU', 'PLTR', 'SMCI', 'ARM', 'NVDL', 'TSLL'],
     'ETF (稳健宽基)': ['TQQQ', 'SOXL', 'IWM', 'QQQ', 'SPY', 'ARKK', 'KWEB', 'XLE', 'XLF', 'SMH', 'TLT', 'GDX']
 }
 
@@ -67,7 +67,6 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
     diag = {"代码": symbol, "HTTP状态": "未请求", "抓取现价": "N/A", "可用到期日": 0, "符合条件合约数": 0, "排查结论": "未完成"}
     
     try:
-        # 创建伪装 Request Session
         session = requests.Session()
         session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
@@ -95,7 +94,6 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
             diag["排查结论"] = f"⚠️ 现价 (${current_price:.2f}) 太高，超出当前资金配置上限"
             return records, diag
 
-        # 💡 重试机制：最多尝试 3 次拉取期权到期日
         dates = []
         for attempt in range(3):
             try:
@@ -139,7 +137,6 @@ def fetch_ticker_options_safe(symbol, budget, min_vol, min_open_int, min_b_price
                 if avoid_earn: continue
 
             try:
-                # 💡 重试机制：拉取单日期权链
                 opt_chain = None
                 for _ in range(2):
                     try:
@@ -307,7 +304,7 @@ if start_btn:
         all_res.extend(res)
         diag_logs.append(diag)
         progress_bar.progress((idx + 1) / len(watchlist))
-        time.sleep(0.5) # 适当微调请求间隔，防止触发频率风控
+        time.sleep(0.5)
         
     status_text.empty()
     progress_bar.empty()
